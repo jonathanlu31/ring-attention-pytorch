@@ -60,10 +60,32 @@ out = tree_attn_decode(q, k, v) # where q, k, v exists across all machines
 
 ## Test
 
-First install requirements
+### NERSC Usage
 
 ```bash
-$ pip install -r requirements.txt
+salloc -A mp309 -N 1 -C gpu -q interactive -t 00:30:00
+module load conda
+conda create -n ring python=3.11
+conda activate ring
+```
+
+First install the package
+
+```bash
+pip install -e .
+pip install click
+```
+
+Then, testing flash attention would be:
+
+```bash
+python assert_flash.py --causal
+```
+
+Alternatively, after installing and setting up the conda environment, you can use the sbatch script in scripts to avoid wasting usage in interactive mode.
+
+```bash
+sbatch assert_flash.sh
 ```
 
 Then say testing autoregressive striped ring attention on cuda would be
