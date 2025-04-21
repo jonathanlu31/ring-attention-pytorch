@@ -21,6 +21,7 @@ from fairscale.nn.model_parallel.layers import (
 )
 from torch import nn
 
+import argparse
 from args import ModelArgs, LlamaModelArgs
 
 # **NOTE**: This code is not runnable without installing `torch` and `fairscale`
@@ -300,18 +301,19 @@ class Transformer(nn.Module):
         output = self.output(h).float()
         return output
 
-
 if __name__ == "__main__":
     print("Running...")
 
-    args = LlamaModelArgs()
+    parser = argparse.ArgumentParser("Llama model testing")
+    parser.add_argument("ckpt_path")
+    ckpt_path = parser.parse_args().ckpt_path
+    # ckpt_path = "/global/homes/f/fogel/.llama/checkpoints/Llama3.1-8B/consolidated.00.pth"
 
+    args = LlamaModelArgs()
     model = Transformer(args)
     model.eval()
 
-    ckpt_path = "/global/homes/f/fogel/.llama/checkpoints/Llama3.1-8B/consolidated.00.pth"
     state_dict = torch.load(ckpt_path, map_location="cpu")
-
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
     print("Missing keys:", missing)
     print("Unexpected keys:", unexpected)
@@ -319,4 +321,4 @@ if __name__ == "__main__":
     dummy_input = torch.randint(0, args.vocab_size, (1, 16))  # batch of 1, 16 tokens
     with torch.inference_mode():
         out = model(dummy_input, start_pos=0)
-    print("Output shape:", out.shape)
+    print("Output shape:", out.shape)   # torch.Size([1, 16, 128256])
