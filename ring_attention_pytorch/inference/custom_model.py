@@ -8,28 +8,19 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # This software may be used and distributed in accordance with the terms of the Llama 3 Community License Agreement.
 
+import argparse
+import json
 import math
+from importlib import resources
+from pathlib import Path
 from typing import Optional, Tuple
 
-import fairscale.nn.model_parallel.initialize as fs_init
 import torch
 import torch.nn.functional as F
-from fairscale.nn.model_parallel.layers import (
-    ColumnParallelLinear,
-    RowParallelLinear,
-    VocabParallelEmbedding,
-)
+from args import ModelArgs
+from distributed import get_world_size
+from ring_attention_llama import RingAttentionLlama
 from torch import nn
-
-import argparse
-from args import ModelArgs, LlamaModelArgs
-
-from ring_attention_pytorch import RingAttention
-import ring_attention_pytorch
-
-# **NOTE**: This code is not runnable without installing `torch` and `fairscale`
-# dependencies. These dependencies are not part of the default dependencies
-# (requirements.txt) of the `llama-models` package.
 
 
 class RMSNorm(torch.nn.Module):
@@ -58,7 +49,9 @@ def apply_scaling(freqs: torch.Tensor) -> torch.Tensor:
 
     wavelen = 2 * torch.pi / freqs
     new_freqs = torch.where(wavelen > low_freq_wavelen, freqs / scale_factor, freqs)
-    smooth = (old_context_len / wavelen - low_freq_factor) / (high_freq_factor - low_freq_factor)
+    smooth = (old_context_len / wavelen - low_freq_factor) / (
+        high_freq_factor - low_freq_factor
+    )
     return torch.where(
         (wavelen >= high_freq_wavelen) & (wavelen <= low_freq_wavelen),
         (1 - smooth) * new_freqs / scale_factor + smooth * new_freqs,
@@ -66,7 +59,9 @@ def apply_scaling(freqs: torch.Tensor) -> torch.Tensor:
     )
 
 
-def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0, use_scaled: bool = False):
+def precompute_freqs_cis(
+    dim: int, end: int, theta: float = 10000.0, use_scaled: bool = False
+):
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
     t = torch.arange(end, device=freqs.device, dtype=torch.float32)
     if use_scaled:
@@ -119,45 +114,27 @@ class Attention(nn.Module):
         self.n_rep = self.n_local_heads // self.n_local_kv_heads
         self.head_dim = args.dim // args.n_heads
 
-        self.wq = nn.Linear(
-            args.dim,
-            args.n_heads * self.head_dim,
-            bias=False
-        )
-        self.wk = nn.Linear(
-            args.dim,
-            self.n_kv_heads * self.head_dim,
-            bias=False
-        )
-        self.wv = nn.Linear(
-            args.dim,
-            self.n_kv_heads * self.head_dim,
-            bias=False
-        )
-        self.wo = nn.Linear(
-            args.n_heads * self.head_dim,
-            args.dim,
-            bias=False
-        )
+        self.wq = nn.Linear(args.dim, args.n_heads * self.head_dim, bias=False)
+        self.wk = nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
+        self.wv = nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
+        self.wo = nn.Linear(args.n_heads * self.head_dim, args.dim, bias=False)
 
-        self.cache_k = torch.zeros(
-            (
-                args.max_batch_size,
-                args.max_seq_len,
-                self.n_local_kv_heads,
-                self.head_dim,
-            )
-        )
-        self.cache_v = torch.zeros(
-            (
-                args.max_batch_size,
-                args.max_seq_len,
-                self.n_local_kv_heads,
-                self.head_dim,
-            )
-        )
-
-        self.ring_attn = RingAttention(dim=self.head_dim)
+        # self.cache_k = torch.zeros(
+        #     (
+        #         args.max_batch_size,
+        #         args.max_seq_len,
+        #         self.n_local_kv_heads,
+        #         self.head_dim,
+        #     )
+        # )
+        # self.cache_v = torch.zeros(
+        #     (
+        #         args.max_batch_size,
+        #         args.max_seq_len,
+        #         self.n_local_kv_heads,
+        #         self.head_dim,
+        #     )
+        # )
 
     def forward(
         self,
@@ -175,22 +152,28 @@ class Attention(nn.Module):
 
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
-        self.cache_k = self.cache_k.to(xq)
-        self.cache_v = self.cache_v.to(xq)
+        # self.cache_k = self.cache_k.to(xq)
+        # self.cache_v = self.cache_v.to(xq)
 
-        self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
-        self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
+        # self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
+        # self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
 
-        keys = self.cache_k[:bsz, : start_pos + seqlen]
-        values = self.cache_v[:bsz, : start_pos + seqlen]
+        # keys = self.cache_k[:bsz, : start_pos + seqlen]
+        # values = self.cache_v[:bsz, : start_pos + seqlen]
 
         # repeat k/v heads if n_kv_heads < n_heads
-        keys = repeat_kv(keys, self.n_rep)  # (bs, cache_len + seqlen, n_local_heads, head_dim)
-        values = repeat_kv(values, self.n_rep)  # (bs, cache_len + seqlen, n_local_heads, head_dim)
+        keys = repeat_kv(
+            keys, self.n_rep
+        )  # (bs, cache_len + seqlen, n_local_heads, head_dim)
+        values = repeat_kv(
+            values, self.n_rep
+        )  # (bs, cache_len + seqlen, n_local_heads, head_dim)
 
         xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
         keys = keys.transpose(1, 2)  # (bs, n_local_heads, cache_len + seqlen, head_dim)
-        values = values.transpose(1, 2)  # (bs, n_local_heads, cache_len + seqlen, head_dim)
+        values = values.transpose(
+            1, 2
+        )  # (bs, n_local_heads, cache_len + seqlen, head_dim)
         scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
         if mask is not None:
             scores = scores + mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
@@ -229,7 +212,15 @@ class TransformerBlock(nn.Module):
         self.n_heads = args.n_heads
         self.dim = args.dim
         self.head_dim = args.dim // args.n_heads
-        self.attention = Attention(args)
+        self.attention = RingAttentionLlama(
+            n_heads=args.n_heads,
+            n_kv_heads=args.n_kv_heads,
+            dim=args.dim,
+            bucket_size=512,
+            ring_seq_size=512,  # TODO: Fix
+            use_striped=args.use_striped,
+            ring_size=get_world_size(),
+        )
         self.feed_forward = FeedForward(
             dim=args.dim,
             hidden_dim=4 * args.dim,
@@ -298,7 +289,9 @@ class Transformer(nn.Module):
             # only for the new sequence. Thus, the matrix of scores is of size
             # (seqlen, cache_len + seqlen), and the only masked entries are (i, j) for
             # j > cache_len + i, since row i corresponds to token cache_len + i.
-            mask = torch.hstack([torch.zeros((seqlen, start_pos), device=tokens.device), mask]).type_as(h)
+            mask = torch.hstack(
+                [torch.zeros((seqlen, start_pos), device=tokens.device), mask]
+            ).type_as(h)
 
         for layer in self.layers:
             h = layer(h, start_pos, freqs_cis, mask)
@@ -306,23 +299,34 @@ class Transformer(nn.Module):
         output = self.output(h).float()
         return output
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser("Llama model testing")
-    parser.add_argument("ckpt_path")
-    ckpt_path = parser.parse_args().ckpt_path   # Example: /global/homes/f/fogel/.llama/checkpoints/Llama3.1-8B/consolidated.00.pth
+    parser.add_argument("ckpt_dir")
+    parser.add_argument("params_name")
+    args = parser.parse_args()
 
-    print(f'Using ring_attention_pytorch at: {ring_attention_pytorch.__file__}') # Should be local library if you ran: pip install -e .
+    ckpt_dir = args.ckpt_dir  # Example: /global/homes/f/fogel/.llama/checkpoints/Llama3.1-8B/consolidated.00.pth
 
-    args = LlamaModelArgs()
+    with (
+        resources.files("ring_attention_pytorch.inference.ring_llama_params")
+        .joinpath(args.params_name)
+        .open() as f
+    ):
+        params = json.loads(f.read())
+
+    args = ModelArgs(**params)
     model = Transformer(args)
+    dtype = getattr(torch, args.dtype)
+    model = model.to(dtype=dtype, device="cuda")
     model.eval()
 
-    state_dict = torch.load(ckpt_path, map_location="cpu")
+    state_dict = torch.load(Path(ckpt_dir) / "consolidated.00.pth", map_location="cpu")
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
     print("Missing keys:", missing)
     print("Unexpected keys:", unexpected)
 
-    dummy_input = torch.randint(0, args.vocab_size, (1, 16))  # batch of 1, 16 tokens
-    with torch.inference_mode():
-        out = model(dummy_input, start_pos=0)
-    print("Output shape:", out.shape)   # torch.Size([1, 16, 128256])
+    # dummy_input = torch.randint(0, args.vocab_size, (1, 16))  # batch of 1, 16 tokens
+    # with torch.inference_mode():
+    #     out = model(dummy_input, start_pos=0)
+    # print("Output shape:", out.shape)   # torch.Size([1, 16, 128256])

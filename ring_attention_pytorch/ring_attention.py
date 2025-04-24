@@ -618,6 +618,10 @@ class RingTransformer(Module):
             # for workload balancing https://arxiv.org/abs/2311.09431 - MIT paper from Brandon et al.
 
             if self.striped_ring_attn:
+                # ring_seq_len * num_gpus -> num_gpus * ring_seq_len
+                # Ex: len=8, gpus=3
+                # [[0,1,2],[3,4,5],[6,7,8],[9,10,11],[12,13,14],[15,16,17],[18,19,20],[21,22,23]] ->
+                # [[0,3,6,9,12,15,18,21],[1,4,7,10,13,16,19,22],[2,5,8,11,14,17,20,23]]
                 x = rearrange(x, 'b (i j) -> b (j i)', i = striped_bucket_size)
 
                 if exists(labels):

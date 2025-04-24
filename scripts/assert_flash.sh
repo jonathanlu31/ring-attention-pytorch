@@ -14,4 +14,4 @@ conda activate ring
 set -x
 
 cd "$SLURM_SUBMIT_DIR"
-srun python ../assert_flash.py  --causal
+srun python ../assert_flash.py  --causal --cuda-kernel

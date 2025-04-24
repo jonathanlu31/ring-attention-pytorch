@@ -28,3 +28,7 @@ def setup(rank, world_size, seed=42):
 @cache
 def get_rank():
     return dist.get_rank()
+
+@cache
+def get_world_size():
+    return dist.get_world_size() if dist.is_initialized() else 1
