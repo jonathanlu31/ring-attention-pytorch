@@ -97,27 +97,27 @@ class RingFlashAttentionCUDAFunction(Function):
 
         assert k.shape[-1] == v.shape[-1], 'for simplicity when doing ring passing, assume dim_values is equal to dim_queries_keys, majority of transformer do this, not a big issue'
 
-        per_machine_seq_size = k.shape[-3]
+        # per_machine_seq_size = k.shape[-3]
 
         # calculate max ring passes
 
         max_ring_passes = None
         num_lookback_buckets = float('inf')
 
-        if exists(max_lookback_seq_len):
-            assert causal
-            assert not (ring_reduce_col and not divisible_by(per_machine_seq_size, bucket_size))
+        # if exists(max_lookback_seq_len):
+        #     assert causal
+        #     assert not (ring_reduce_col and not divisible_by(per_machine_seq_size, bucket_size))
 
-            max_ring_passes = ceil(max_lookback_seq_len / per_machine_seq_size)
-            num_lookback_buckets = max_lookback_seq_len // bucket_size
+        #     max_ring_passes = ceil(max_lookback_seq_len / per_machine_seq_size)
+        #     num_lookback_buckets = max_lookback_seq_len // bucket_size
 
         # ignore key padding mask if autoregressive
 
         if causal:
             mask = None
 
-        bucket_size = min(per_machine_seq_size, bucket_size)
-        per_machine_buckets = per_machine_seq_size // bucket_size
+        # bucket_size = min(per_machine_seq_size, bucket_size)
+        # per_machine_buckets = per_machine_seq_size // bucket_size
 
         orig_k, orig_v, orig_mask, q_seq_len, device = k, v, mask, q.shape[1], q.device
 
@@ -144,7 +144,7 @@ class RingFlashAttentionCUDAFunction(Function):
 
         can_fuse_final_output_normalization = not causal or (causal and striped_ring_attn)
 
-        for (ring_rank, (is_first, is_last)), ((kv, mask), (receive_kv, receive_mask)) in ring_pass_fn(kv, mask, receive_buffers = (receive_kv, receive_mask), max_iters = max_ring_passes, ring_size = ring_size):
+        for (ring_rank, (is_first, is_last)), (kv, mask) in ring_pass_fn(kv, mask, receive_buffers = (receive_kv, receive_mask), max_iters = max_ring_passes, ring_size = ring_size):
             k, v = kv
 
             # account for grouped query attention
@@ -199,7 +199,7 @@ class RingFlashAttentionCUDAFunction(Function):
             causal,
             softmax_scale,
             orig_mask,
-            bucket_size,
+            # bucket_size,
             ring_reduce_col,
             max_ring_passes,
             num_lookback_buckets,

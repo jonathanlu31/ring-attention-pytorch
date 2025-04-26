@@ -166,7 +166,6 @@ class RingAttentionLlama(nn.Module):
         n_kv_heads: int | None = None,
         dim: int = 4096,
         ring_size: int = 1,
-        bucket_size: int = 512,
         ring_seq_size: int = 512,
         use_striped: bool = False,
         rotary_embed: bool = False,
@@ -189,7 +188,6 @@ class RingAttentionLlama(nn.Module):
 
         self.ring_seq_size = ring_seq_size
         self.ring_size = ring_size
-        self.bucket_size = bucket_size
 
         if rotary_embed:
             self.freqs_cis = precompute_freqs_cis(
@@ -234,7 +232,7 @@ class RingAttentionLlama(nn.Module):
             xv,
             mask,
             causal=True,
-            bucket_size=self.bucket_size,
+            bucket_size=self.ring_seq_size,
             ring_reduce_col=self.ring_size > 1,
             striped_ring_attn=self.use_striped,
             ring_size=self.ring_size,

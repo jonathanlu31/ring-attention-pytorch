@@ -4,9 +4,6 @@ from functools import wraps, partial
 from collections import namedtuple
 
 import torch
-from torch import nn, Tensor
-from torch.nn import Module, ModuleList
-from torch.autograd import Function
 
 import torch.distributed as dist
 from ring_attention_pytorch.distributed import get_rank, get_world_size, is_distributed
@@ -61,8 +58,8 @@ def send_and_receive_(x, receive_buffer, send_to_rank, receive_from_rank):
 
 def ring_pass(
     num_ring_passes: int,
-    x: Tensor,
-    receive_buffer: Tensor | None = None,
+    x: torch.Tensor,
+    receive_buffer: torch.Tensor | None = None,
     ring_size: int | None = None
 ):
     ring_size = default(ring_size, get_world_size())
@@ -83,7 +80,7 @@ one_ring_pass = partial(ring_pass, 1)
 RingInfo = namedtuple('RingInfo', ['ring_rank', 'iter_info'])
 
 def null_ring_pass(*tensors, max_iters = None, receive_buffers = None, ring_size = None):
-    yield RingInfo(0, (True, True)), (tensors, receive_buffers)
+    yield RingInfo(0, (True, True)), tensors
 
 def all_ring_pass(*tensors, max_iters = None, receive_buffers = None, ring_size = None):
     ring_size = default(ring_size, get_world_size())
@@ -101,7 +98,7 @@ def all_ring_pass(*tensors, max_iters = None, receive_buffers = None, ring_size 
         is_first = ind == 0
         is_last = ind == (total_iters - 1)
 
-        yield RingInfo(curr_ring_pos, (is_first,  is_last)), (tensors, receive_buffers)
+        yield RingInfo(curr_ring_pos, (is_first,  is_last)), tensors
 
         curr_ring_pos = circular_index_left(curr_ring_pos, ring_size)
 
