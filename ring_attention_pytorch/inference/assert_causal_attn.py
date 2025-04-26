@@ -113,7 +113,7 @@ def start(
 @click.option("--seq-len", default=3072, help="sequence length to test")
 @click.option("--model-dim", default=1024, help="model dimensions for testing")
 @click.option("--n-heads", default=8, help="number of query attention heads")
-@click.option("--n-kv-heads", default=8, help="number of query attention head groups")
+@click.option("--n-kv-heads", default=2, help="number of query attention head groups")
 def test(
     world_size: int,
     batch_size: int,

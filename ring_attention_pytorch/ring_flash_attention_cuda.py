@@ -31,6 +31,17 @@ def default(val, d):
 def divisible_by(num, den):
     return (num % den) == 0
 
+def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
+    """torch.repeat_interleave(x, dim=2, repeats=n_rep)"""
+    bs, slen, n_kv_heads, head_dim = x.shape
+    if n_rep == 1:
+        return x
+    return (
+        x[:, :, :, None, :]
+        .expand(bs, slen, n_kv_heads, n_rep, head_dim)
+        .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
+    )
+
 # ring + (flash) attention forwards and backwards
 
 # flash attention v1 - https://arxiv.org/abs/2205.14135
@@ -137,8 +148,7 @@ class RingFlashAttentionCUDAFunction(Function):
             k, v = kv
 
             # account for grouped query attention
-
-            k, v = map(lambda t: repeat(t, '... h d -> ... (g h) d', g = q_head_groups), (k, v))
+            k, v = repeat_kv(k, q_head_groups), repeat_kv(v, q_head_groups)
 
             # translate key padding mask to bias
 
