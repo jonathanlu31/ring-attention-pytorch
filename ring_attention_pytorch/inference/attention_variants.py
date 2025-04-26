@@ -251,7 +251,7 @@ class RingAttentionLlama(nn.Module):
         pos: torch.Tensor | None = None,
     ):
         if pos is None:
-            pos = torch.arange(x.shape[1], dtype=torch.long, device=x.device)[None, :]
+            pos = torch.arange(x.shape[1], dtype=torch.long, device=x.device).repeat(x.shape[0], 1)
 
         # If batching, x, mask, and pos should already be padded to max seq len in the batch
         # This pads the sequence further to make it a multiple of ring_seq_size
@@ -353,7 +353,6 @@ class Attention(nn.Module):
         xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
 
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
-
         # self.cache_k = self.cache_k.to(xq)
         # self.cache_v = self.cache_v.to(xq)
 
@@ -390,7 +389,7 @@ class Attention(nn.Module):
         pos: torch.Tensor | None = None,
     ):
         if pos is None:
-            pos = torch.arange(x.shape[1], dtype=torch.long, device=x.device)[None, :]
+            pos = torch.arange(x.shape[1], dtype=torch.long, device=x.device).repeat(x.shape[0], 1)
 
         self.freqs_cis = self.freqs_cis.to(x.device)
         freqs_cis = self.freqs_cis[pos]

@@ -70,13 +70,13 @@ class RingFlashAttentionCUDAFunction(Function):
         softmax_scale = q.shape[-1] ** -0.5
 
         if q.dtype == torch.float32:
-            q = q.half()
+            q = q.to(torch.bfloat16)
 
         if k.dtype == torch.float32:
-            k = k.half()
+            k = k.to(torch.bfloat16)
 
         if v.dtype == torch.float32:
-            v = v.half()
+            v = v.to(torch.bfloat16)
 
         ring_size = default(ring_size, get_world_size())
 

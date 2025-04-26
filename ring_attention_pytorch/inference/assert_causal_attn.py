@@ -38,6 +38,8 @@ def start(
 ):
     setup(rank, world_size)
     print(f"rank {rank} started")
+    torch.manual_seed(42)
+    torch.cuda.manual_seed_all(42)
 
     ring_seq_size = ceil(seq_len / world_size)
 
@@ -49,6 +51,7 @@ def start(
         ring_seq_size=ring_seq_size,
         max_seq_len=seq_len,
         rotary_embed=True,
+        ring_size=world_size,
     ).to(torch.bfloat16)
 
     eager_attention = Attention(
@@ -83,8 +86,6 @@ def start(
     # validate output is the same for sequence split across machines vs without
 
     if rank == 0:
-        ring_attention = ring_attention.cpu()
-        eager_attention = eager_attention.cpu()
         ring_out = ring_out.cpu()
         eager_out = eager_out.cpu()
 
