@@ -7,9 +7,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from distributed import all_gather, get_rank, is_distributed
 from einops import rearrange
-from flash_attn import flash_attn_func
 
 from ring_attention_pytorch.ring_flash_attention_cuda import ring_flash_attn_cuda
+from ring_attention_pytorch.inference.flash_attn_utils import _flash_attention_forward
 
 ##############
 # Rotary Positional Embeddings
@@ -362,8 +362,14 @@ class Attention(nn.Module):
         # values = self.cache_v[:bsz, : start_pos + seqlen]
 
         if self.use_flash:
-            output = flash_attn_func(xq, xk, xv, causal=True)
+            output = _flash_attention_forward(xq, xk, xv, mask, query_length=xq.shape[1], is_causal=True)
         else:
+            # TODO: Might need to fix this
+            seqlen = x.shape[1]
+            if seqlen > 1 and mask is None:
+                mask = torch.full((seqlen, seqlen), float("-inf"), device=x.device)
+                mask = torch.triu(mask, diagonal=1)
+
             # TODO: Fix
             # repeat k/v heads if n_kv_heads < n_heads
             xk = repeat_kv(
@@ -401,11 +407,6 @@ class Attention(nn.Module):
 
         self.freqs_cis = self.freqs_cis.to(x.device)
         freqs_cis = self.freqs_cis[pos]
-
-        seqlen = x.shape[1]
-        if seqlen > 1 and mask is None:
-            mask = torch.full((seqlen, seqlen), float("-inf"), device=x.device)
-            mask = torch.triu(mask, diagonal=1)
 
         out = self(x=x, mask=mask, freqs_cis=freqs_cis, start_pos=0)
 
