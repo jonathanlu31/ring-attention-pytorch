@@ -1,4 +1,5 @@
 import math
+from math import ceil
 from typing import Literal
 
 import torch
@@ -6,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from distributed import all_gather, get_rank, is_distributed
 from einops import rearrange
-from math import ceil
+from flash_attn import flash_attn_func
 
 from ring_attention_pytorch.ring_flash_attention_cuda import ring_flash_attn_cuda
 
@@ -247,13 +248,13 @@ class RingAttentionLlama(nn.Module):
     ):
         ring_seq_size = ceil(x.shape[1] / self.ring_size)
         if pos is None:
-            pos = torch.arange(x.shape[1], dtype=torch.long, device=x.device).repeat(x.shape[0], 1)
+            pos = torch.arange(x.shape[1], dtype=torch.long, device=x.device).repeat(
+                x.shape[0], 1
+            )
 
         # If batching, x, mask, and pos should already be padded to max seq len in the batch
         # This pads the sequence further to make it a multiple of ring_seq_size
-        (x, mask, pos), pad_length = maybe_pad_seq_and_mask(
-            x, mask, pos, ring_seq_size
-        )
+        (x, mask, pos), pad_length = maybe_pad_seq_and_mask(x, mask, pos, ring_seq_size)
 
         if self.use_striped:
             x = rearrange(x, "b (i j) d -> b (j i) d", i=ring_seq_size)
@@ -291,6 +292,7 @@ class Attention(nn.Module):
         n_heads: int = 8,
         n_kv_heads: int | None = None,
         dim: int = 4096,
+        use_flash: bool = True,
         rotary_embed: bool = False,
         max_seq_len: int = -1,
         rope_theta: int = 10000,
@@ -316,6 +318,7 @@ class Attention(nn.Module):
         self.wk = nn.Linear(dim, self.n_kv_heads * self.head_dim, bias=False)
         self.wv = nn.Linear(dim, self.n_kv_heads * self.head_dim, bias=False)
         self.wo = nn.Linear(n_heads * self.head_dim, dim, bias=False)
+        self.use_flash = use_flash
 
         # self.cache_k = torch.zeros(
         #     (
@@ -358,24 +361,31 @@ class Attention(nn.Module):
         # keys = self.cache_k[:bsz, : start_pos + seqlen]
         # values = self.cache_v[:bsz, : start_pos + seqlen]
 
-        # TODO: Fix
-        # repeat k/v heads if n_kv_heads < n_heads
-        xk = repeat_kv(
-            xk, self.n_rep
-        )  # (bs, cache_len + seqlen, n_local_heads, head_dim)
-        xv = repeat_kv(
-            xv, self.n_rep
-        )  # (bs, cache_len + seqlen, n_local_heads, head_dim)
+        if self.use_flash:
+            output = flash_attn_func(xq, xk, xv, causal=True)
+        else:
+            # TODO: Fix
+            # repeat k/v heads if n_kv_heads < n_heads
+            xk = repeat_kv(
+                xk, self.n_rep
+            )  # (bs, cache_len + seqlen, n_local_heads, head_dim)
+            xv = repeat_kv(
+                xv, self.n_rep
+            )  # (bs, cache_len + seqlen, n_local_heads, head_dim)
 
-        xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-        xk = xk.transpose(1, 2)  # (bs, n_local_heads, cache_len + seqlen, head_dim)
-        xv = xv.transpose(1, 2)  # (bs, n_local_heads, cache_len + seqlen, head_dim)
-        scores = torch.matmul(xq, xk.transpose(2, 3)) / math.sqrt(self.head_dim)
-        if mask is not None:
-            scores = scores + mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
-        scores = F.softmax(scores.float(), dim=-1).type_as(xq)
-        output = torch.matmul(scores, xv)  # (bs, n_local_heads, seqlen, head_dim)
-        output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
+            xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
+            xk = xk.transpose(1, 2)  # (bs, n_local_heads, cache_len + seqlen, head_dim)
+            xv = xv.transpose(1, 2)  # (bs, n_local_heads, cache_len + seqlen, head_dim)
+            scores = torch.matmul(xq, xk.transpose(2, 3)) / math.sqrt(self.head_dim)
+            if mask is not None:
+                scores = (
+                    scores + mask
+                )  # (bs, n_local_heads, seqlen, cache_len + seqlen)
+            scores = F.softmax(scores.float(), dim=-1).type_as(xq)
+            output = torch.matmul(scores, xv)  # (bs, n_local_heads, seqlen, head_dim)
+            output = output.transpose(1, 2).contiguous()
+
+        output = output.view(bsz, seqlen, -1)
         return self.wo(output)
 
     def forward_attention(
@@ -385,7 +395,9 @@ class Attention(nn.Module):
         pos: torch.Tensor | None = None,
     ):
         if pos is None:
-            pos = torch.arange(x.shape[1], dtype=torch.long, device=x.device).repeat(x.shape[0], 1)
+            pos = torch.arange(x.shape[1], dtype=torch.long, device=x.device).repeat(
+                x.shape[0], 1
+            )
 
         self.freqs_cis = self.freqs_cis.to(x.device)
         freqs_cis = self.freqs_cis[pos]

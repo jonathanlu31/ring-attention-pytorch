@@ -56,6 +56,7 @@ def start(
         n_kv_heads=n_kv_heads,
         max_seq_len=seq_len,
         rotary_embed=True,
+        use_flash=True,
     ).to(torch.bfloat16)
 
     eager_attention.load_state_dict(ring_attention.state_dict())
