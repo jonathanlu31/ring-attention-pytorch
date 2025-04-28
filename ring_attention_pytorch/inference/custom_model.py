@@ -18,13 +18,23 @@ import torch
 import torch.nn.functional as F
 from args import ModelArgs
 from distributed import get_world_size
-from ring_attention_pytorch.inference.attention_variants import RingAttentionLlama, precompute_freqs_cis, Attention, maybe_pad_seq_and_mask, shard_seq, join_seq
 from einops import rearrange
 from torch import nn
 
+from ring_attention_pytorch.inference.attention_variants import (
+    Attention,
+    RingAttentionLlama,
+    join_seq,
+    maybe_pad_seq_and_mask,
+    precompute_freqs_cis,
+    shard_seq,
+)
+
 
 class RMSNorm(torch.nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-6, dtype: torch.dtype = torch.bfloat16):
+    def __init__(
+        self, dim: int, eps: float = 1e-6, dtype: torch.dtype = torch.bfloat16
+    ):
         super().__init__()
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim, dtype=dtype))
@@ -76,7 +86,7 @@ class TransformerBlock(nn.Module):
                 dim=args.dim,
                 use_striped=args.use_striped,
                 ring_size=get_world_size(),
-                dtype=dtype
+                dtype=dtype,
             )
         elif args.attn_implementation == "flash":
             self.attention = Attention(
@@ -84,7 +94,7 @@ class TransformerBlock(nn.Module):
                 n_kv_heads=args.n_kv_heads,
                 dim=args.dim,
                 use_flash=True,
-                dtype=dtype
+                dtype=dtype,
             )
         elif args.attn_implementation == "eager":
             self.attention = Attention(
@@ -92,17 +102,19 @@ class TransformerBlock(nn.Module):
                 n_kv_heads=args.n_kv_heads,
                 dim=args.dim,
                 use_flash=False,
-                dtype=dtype
+                dtype=dtype,
             )
         else:
-            raise ValueError(f"Invalid attention implementation {args.attn_implementation}")
+            raise ValueError(
+                f"Invalid attention implementation {args.attn_implementation}"
+            )
 
         self.feed_forward = FeedForward(
             dim=args.dim,
             hidden_dim=4 * args.dim,
             multiple_of=args.multiple_of,
             ffn_dim_multiplier=args.ffn_dim_multiplier,
-            dtype=dtype
+            dtype=dtype,
         )
         self.layer_id = layer_id
         self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps, dtype=dtype)
@@ -130,14 +142,18 @@ class Transformer(nn.Module):
         self.vocab_size = params.vocab_size
         self.n_layers = params.n_layers
 
-        self.tok_embeddings = nn.Embedding(params.vocab_size, params.dim, dtype=self.dtype)
+        self.tok_embeddings = nn.Embedding(
+            params.vocab_size, params.dim, dtype=self.dtype
+        )
 
         self.layers = torch.nn.ModuleList()
         for layer_id in range(params.n_layers):
             self.layers.append(TransformerBlock(layer_id, params, self.dtype))
 
         self.norm = RMSNorm(params.dim, eps=params.norm_eps, dtype=self.dtype)
-        self.output = nn.Linear(params.dim, params.vocab_size, bias=False, dtype=self.dtype)
+        self.output = nn.Linear(
+            params.dim, params.vocab_size, bias=False, dtype=self.dtype
+        )
 
         self.freqs_cis = precompute_freqs_cis(
             params.dim // params.n_heads,
@@ -147,7 +163,13 @@ class Transformer(nn.Module):
         )
 
     @torch.inference_mode()
-    def forward(self, tokens: torch.Tensor, attn_mask: torch.Tensor | None = None, input_pos: torch.Tensor | None = None, auto_shard_seq: bool = False):
+    def forward(
+        self,
+        tokens: torch.Tensor,
+        attn_mask: torch.Tensor | None = None,
+        input_pos: torch.Tensor | None = None,
+        auto_shard_seq: bool = False,
+    ):
         _bsz, seqlen = tokens.shape
 
         if auto_shard_seq:
@@ -156,16 +178,22 @@ class Transformer(nn.Module):
 
             # If batching, x, mask, and pos should already be padded to max seq len in the batch
             # This pads the sequence further to make it a multiple of ring_seq_size
-            (tokens, attn_mask, input_pos), pad_length = maybe_pad_seq_and_mask(tokens, attn_mask, input_pos, ring_seq_size)
+            (tokens, attn_mask, input_pos), pad_length = maybe_pad_seq_and_mask(
+                tokens, attn_mask, input_pos, ring_seq_size
+            )
 
             if self.params.use_striped:
                 tokens = rearrange(tokens, "b (i j) d -> b (j i) d", i=ring_seq_size)
                 input_pos = rearrange(input_pos, "b (i j) -> b (j i)", i=ring_seq_size)
 
                 if attn_mask is not None:
-                    attn_mask = rearrange(attn_mask, "b (i j) -> b (j i)", i=ring_seq_size)
+                    attn_mask = rearrange(
+                        attn_mask, "b (i j) -> b (j i)", i=ring_seq_size
+                    )
 
-            tokens, attn_mask, input_pos = shard_seq(tokens, attn_mask, input_pos, ring_seq_size)
+            tokens, attn_mask, input_pos = shard_seq(
+                tokens, attn_mask, input_pos, ring_seq_size
+            )
 
         self.freqs_cis = self.freqs_cis.to(tokens.device)
         freqs_cis = self.freqs_cis[input_pos]
@@ -196,11 +224,9 @@ if __name__ == "__main__":
 
     ckpt_dir = args.ckpt_dir  # Example: /global/homes/f/fogel/.llama/checkpoints/Llama3.1-8B/consolidated.00.pth
 
-    with (
-        resources.files("ring_attention_pytorch.inference.ring_llama_params")
-        .joinpath(args.params_name)
-        .open() as f
-    ):
+    with resources.files("ring_attention_pytorch.inference.ring_llama_params").joinpath(
+        args.params_name
+    ).open() as f:
         params = json.loads(f.read())
 
     args = ModelArgs(**params)

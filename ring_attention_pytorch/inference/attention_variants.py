@@ -8,8 +8,8 @@ import torch.nn.functional as F
 from distributed import all_gather, get_rank, is_distributed
 from einops import rearrange
 
-from ring_attention_pytorch.ring_flash_attention_cuda import ring_flash_attn_cuda
 from ring_attention_pytorch.inference.flash_attn_utils import _flash_attention_forward
+from ring_attention_pytorch.ring_flash_attention_cuda import ring_flash_attn_cuda
 
 ##############
 # Rotary Positional Embeddings
@@ -53,7 +53,10 @@ def precompute_freqs_cis(
 def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
     ndim = x.ndim
     assert ndim > 1
-    assert freqs_cis.shape == (x.shape[0], x.shape[1], x.shape[-1]), (freqs_cis.shape, x.shape)
+    assert freqs_cis.shape == (x.shape[0], x.shape[1], x.shape[-1]), (
+        freqs_cis.shape,
+        x.shape,
+    )
     shape = [d if i in [0, 1, ndim - 1] else 1 for i, d in enumerate(x.shape)]
     return freqs_cis.view(*shape)
 
@@ -198,8 +201,12 @@ class RingAttentionLlama(nn.Module):
             )
 
         self.wq = nn.Linear(dim, self.n_heads * self.head_dim, bias=False, dtype=dtype)
-        self.wk = nn.Linear(dim, self.n_kv_heads * self.head_dim, bias=False, dtype=dtype)
-        self.wv = nn.Linear(dim, self.n_kv_heads * self.head_dim, bias=False, dtype=dtype)
+        self.wk = nn.Linear(
+            dim, self.n_kv_heads * self.head_dim, bias=False, dtype=dtype
+        )
+        self.wv = nn.Linear(
+            dim, self.n_kv_heads * self.head_dim, bias=False, dtype=dtype
+        )
         self.wo = nn.Linear(self.n_heads * self.head_dim, dim, bias=False, dtype=dtype)
 
     def forward(
@@ -317,8 +324,12 @@ class Attention(nn.Module):
             )
 
         self.wq = nn.Linear(dim, n_heads * self.head_dim, bias=False, dtype=dtype)
-        self.wk = nn.Linear(dim, self.n_kv_heads * self.head_dim, bias=False, dtype=dtype)
-        self.wv = nn.Linear(dim, self.n_kv_heads * self.head_dim, bias=False, dtype=dtype)
+        self.wk = nn.Linear(
+            dim, self.n_kv_heads * self.head_dim, bias=False, dtype=dtype
+        )
+        self.wv = nn.Linear(
+            dim, self.n_kv_heads * self.head_dim, bias=False, dtype=dtype
+        )
         self.wo = nn.Linear(n_heads * self.head_dim, dim, bias=False, dtype=dtype)
         self.use_flash = use_flash
 
@@ -363,7 +374,9 @@ class Attention(nn.Module):
         # values = self.cache_v[:bsz, : start_pos + seqlen]
 
         if self.use_flash:
-            output = _flash_attention_forward(xq, xk, xv, mask, query_length=xq.shape[1], is_causal=True)
+            output = _flash_attention_forward(
+                xq, xk, xv, mask, query_length=xq.shape[1], is_causal=True
+            )
         else:
             # TODO: Might need to fix this
             seqlen = x.shape[1]

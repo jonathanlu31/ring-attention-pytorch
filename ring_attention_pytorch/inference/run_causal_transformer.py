@@ -8,17 +8,18 @@ python run_single_model.py \
     --output-file /tmp/llama_out.pt \
     --world-size 2 --batch-size 4 --seq-len 3072
 """
-import os
+
 import json
+import os
 from importlib import resources
 
 import click
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-
-from custom_model import Transformer
 from args import ModelArgs
+from custom_model import Transformer
+
 from ring_attention_pytorch.inference.utils import collate
 
 
@@ -66,7 +67,12 @@ def start(
     input_ids, attn_mask, pos = collate(dummy, device=f"cuda:{rank}")
 
     with torch.inference_mode():
-        output = model.forward(input_ids, attn_mask, pos, auto_shard_seq=(model_args.attn_implementation == "ring"))
+        output = model.forward(
+            input_ids,
+            attn_mask,
+            pos,
+            auto_shard_seq=(model_args.attn_implementation == "ring"),
+        )
 
     if rank == 0:
         torch.save(
