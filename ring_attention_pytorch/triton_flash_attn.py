@@ -373,7 +373,8 @@ def flash_attn_forward(
         o = init_fn(q)
 
     BLOCK_HEADDIM = max(triton.next_power_of_2(d), 16)
-    BLOCK = 128
+    # BLOCK = 128
+    BLOCK = 64
     num_warps = 4 if d <= 64 else 8
     grid = lambda META: (triton.cdiv(seqlen_q, META["BLOCK_M"]), batch * nheads)
 
