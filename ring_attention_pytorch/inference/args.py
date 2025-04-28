@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-
+from typing import Literal
 
 @dataclass
 class ModelArgs:
@@ -18,8 +18,8 @@ class ModelArgs:
     max_seq_len: int = 2048
     dtype: str = "bfloat16"
 
-    # ring attention params
-    use_striped: bool = True
+    attn_implementation: Literal["ring", "flash", "eager"] = "ring"
+    use_striped: bool = False
 
     # # vision model params
     # vision_chunk_size: int = -1  # image resolution for image models

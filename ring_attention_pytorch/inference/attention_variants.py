@@ -53,7 +53,7 @@ def precompute_freqs_cis(
 def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
     ndim = x.ndim
     assert ndim > 1
-    assert freqs_cis.shape == (x.shape[0], x.shape[1], x.shape[-1])
+    assert freqs_cis.shape == (x.shape[0], x.shape[1], x.shape[-1]), (freqs_cis.shape, x.shape)
     shape = [d if i in [0, 1, ndim - 1] else 1 for i, d in enumerate(x.shape)]
     return freqs_cis.view(*shape)
 
@@ -173,6 +173,7 @@ class RingAttentionLlama(nn.Module):
         max_seq_len: int = -1,
         rope_theta: int = 10000,
         use_scaled_rope: bool = False,
+        dtype: torch.dtype = torch.bfloat16,
     ):
         super().__init__()
         # whether to use flash attention cuda kernel
@@ -196,16 +197,16 @@ class RingAttentionLlama(nn.Module):
                 use_scaled_rope,
             )
 
-        self.wq = nn.Linear(dim, self.n_heads * self.head_dim, bias=False)
-        self.wk = nn.Linear(dim, self.n_kv_heads * self.head_dim, bias=False)
-        self.wv = nn.Linear(dim, self.n_kv_heads * self.head_dim, bias=False)
-        self.wo = nn.Linear(self.n_heads * self.head_dim, dim, bias=False)
+        self.wq = nn.Linear(dim, self.n_heads * self.head_dim, bias=False, dtype=dtype)
+        self.wk = nn.Linear(dim, self.n_kv_heads * self.head_dim, bias=False, dtype=dtype)
+        self.wv = nn.Linear(dim, self.n_kv_heads * self.head_dim, bias=False, dtype=dtype)
+        self.wo = nn.Linear(self.n_heads * self.head_dim, dim, bias=False, dtype=dtype)
 
     def forward(
         self,
         x: torch.Tensor,
-        mask: torch.Tensor | None,
         freqs_cis: torch.Tensor,
+        mask: torch.Tensor | None,
     ):
         """
         einstein notation
@@ -297,6 +298,7 @@ class Attention(nn.Module):
         max_seq_len: int = -1,
         rope_theta: int = 10000,
         use_scaled_rope: bool = False,
+        dtype: torch.dtype = torch.bfloat16,
     ):
         super().__init__()
         self.n_kv_heads = n_heads if n_kv_heads is None else n_kv_heads
@@ -314,10 +316,10 @@ class Attention(nn.Module):
                 use_scaled_rope,
             )
 
-        self.wq = nn.Linear(dim, n_heads * self.head_dim, bias=False)
-        self.wk = nn.Linear(dim, self.n_kv_heads * self.head_dim, bias=False)
-        self.wv = nn.Linear(dim, self.n_kv_heads * self.head_dim, bias=False)
-        self.wo = nn.Linear(n_heads * self.head_dim, dim, bias=False)
+        self.wq = nn.Linear(dim, n_heads * self.head_dim, bias=False, dtype=dtype)
+        self.wk = nn.Linear(dim, self.n_kv_heads * self.head_dim, bias=False, dtype=dtype)
+        self.wv = nn.Linear(dim, self.n_kv_heads * self.head_dim, bias=False, dtype=dtype)
+        self.wo = nn.Linear(n_heads * self.head_dim, dim, bias=False, dtype=dtype)
         self.use_flash = use_flash
 
         # self.cache_k = torch.zeros(
@@ -340,7 +342,6 @@ class Attention(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        start_pos: int,
         freqs_cis: torch.Tensor,
         mask: torch.Tensor | None,
     ):
@@ -408,6 +409,6 @@ class Attention(nn.Module):
         self.freqs_cis = self.freqs_cis.to(x.device)
         freqs_cis = self.freqs_cis[pos]
 
-        out = self(x=x, mask=mask, freqs_cis=freqs_cis, start_pos=0)
+        out = self(x=x, mask=mask, freqs_cis=freqs_cis)
 
         return out

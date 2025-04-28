@@ -9,6 +9,6 @@
     "norm_eps": 1e-05,
     "rope_theta": 500000.0,
     "use_scaled_rope": true,
-    "attn_implementation": "flash",
+    "attn_implementation": "ring",
     "use_striped": false
 }

@@ -1,7 +1,7 @@
 import torch
 
 
-def collate(inputs: list[list[int]], device: torch.device | str):
+def collate(inputs: list[list[int]] | list[torch.Tensor], device: torch.device | str):
     batch_size = len(inputs)
     max_prompt_len = max([len(p) for p in inputs])
 
