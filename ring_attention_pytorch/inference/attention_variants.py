@@ -6,6 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from distributed import all_gather, get_rank, is_distributed
 from einops import rearrange
+from math import ceil
 
 from ring_attention_pytorch.ring_flash_attention_cuda import ring_flash_attn_cuda
 
@@ -166,7 +167,6 @@ class RingAttentionLlama(nn.Module):
         n_kv_heads: int | None = None,
         dim: int = 4096,
         ring_size: int = 1,
-        ring_seq_size: int = 512,
         use_striped: bool = False,
         rotary_embed: bool = False,
         max_seq_len: int = -1,
@@ -185,8 +185,6 @@ class RingAttentionLlama(nn.Module):
         self.scale = self.head_dim**-0.5
 
         self.use_striped = use_striped
-
-        self.ring_seq_size = ring_seq_size
         self.ring_size = ring_size
 
         if rotary_embed:
@@ -232,7 +230,6 @@ class RingAttentionLlama(nn.Module):
             xv,
             mask,
             causal=True,
-            bucket_size=self.ring_seq_size,
             ring_reduce_col=self.ring_size > 1,
             striped_ring_attn=self.use_striped,
             ring_size=self.ring_size,
@@ -248,23 +245,24 @@ class RingAttentionLlama(nn.Module):
         mask: torch.Tensor | None = None,
         pos: torch.Tensor | None = None,
     ):
+        ring_seq_size = ceil(x.shape[1] / self.ring_size)
         if pos is None:
             pos = torch.arange(x.shape[1], dtype=torch.long, device=x.device).repeat(x.shape[0], 1)
 
         # If batching, x, mask, and pos should already be padded to max seq len in the batch
         # This pads the sequence further to make it a multiple of ring_seq_size
         (x, mask, pos), pad_length = maybe_pad_seq_and_mask(
-            x, mask, pos, self.ring_seq_size
+            x, mask, pos, ring_seq_size
         )
 
         if self.use_striped:
-            x = rearrange(x, "b (i j) d -> b (j i) d", i=self.ring_seq_size)
-            pos = rearrange(pos, "b (i j) -> b (j i)", i=self.ring_seq_size)
+            x = rearrange(x, "b (i j) d -> b (j i) d", i=ring_seq_size)
+            pos = rearrange(pos, "b (i j) -> b (j i)", i=ring_seq_size)
 
             if mask is not None:
-                mask = rearrange(mask, "b (i j) -> b (j i)", i=self.ring_seq_size)
+                mask = rearrange(mask, "b (i j) -> b (j i)", i=ring_seq_size)
 
-        x, mask, pos = shard_seq(x, mask, pos, self.ring_seq_size)
+        x, mask, pos = shard_seq(x, mask, pos, ring_seq_size)
         self.freqs_cis = self.freqs_cis.to(x.device)
         freqs_cis = self.freqs_cis[pos]
 
@@ -277,7 +275,7 @@ class RingAttentionLlama(nn.Module):
         out = join_seq(out)
 
         if self.use_striped:
-            out = rearrange(out, "b (j i) d -> b (i j) d", i=self.ring_seq_size)
+            out = rearrange(out, "b (j i) d -> b (i j) d", i=ring_seq_size)
 
         return out[:, pad_length:]
 

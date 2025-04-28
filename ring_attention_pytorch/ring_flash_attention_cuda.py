@@ -59,7 +59,7 @@ class RingFlashAttentionCUDAFunction(Function):
         v: Tensor,
         mask: Tensor | None,
         causal: bool,
-        bucket_size: int,
+        # bucket_size: int,
         ring_reduce_col: bool,
         striped_ring_attn: bool,
         max_lookback_seq_len: int | None,
@@ -370,7 +370,6 @@ def ring_flash_attn_cuda(
     v: Tensor,
     mask: Tensor | None = None,
     causal: bool = False,
-    bucket_size: int = 1024,
     ring_reduce_col: bool = False,
     striped_ring_attn: bool = False,
     max_lookback_seq_len: int | None = None,
@@ -378,4 +377,4 @@ def ring_flash_attn_cuda(
     softclamp_qk_sim: bool = False,
     softclamp_value: float = 50.
 ):
-    return ring_flash_attn_cuda_(q, k, v, mask, causal, bucket_size, ring_reduce_col, striped_ring_attn, max_lookback_seq_len, ring_size, softclamp_qk_sim, softclamp_value)
+    return ring_flash_attn_cuda_(q, k, v, mask, causal, ring_reduce_col, striped_ring_attn, max_lookback_seq_len, ring_size, softclamp_qk_sim, softclamp_value)

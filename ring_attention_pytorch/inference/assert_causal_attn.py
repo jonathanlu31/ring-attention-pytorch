@@ -1,5 +1,4 @@
 import os
-from math import ceil
 
 import click
 import torch
@@ -41,14 +40,11 @@ def start(
     torch.manual_seed(42)
     torch.cuda.manual_seed_all(42)
 
-    ring_seq_size = ceil(seq_len / world_size)
-
     ring_attention = RingAttentionLlama(
         dim=dim,
         n_heads=n_heads,
         n_kv_heads=n_kv_heads,
         use_striped=use_striped,
-        ring_seq_size=ring_seq_size,
         max_seq_len=seq_len,
         rotary_embed=True,
         ring_size=world_size,
