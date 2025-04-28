@@ -5,20 +5,12 @@ import torch
 import torch.distributed as dist
 
 
-def setup(rank, world_size, seed=42):
+def setup(world_size, rank, seed=42):
     assert rank < world_size
-
-    os.environ["MASTER_ADDR"] = "localhost"
-    os.environ["MASTER_PORT"] = "12355"
 
     device = f"cuda:{rank}"
     torch.cuda.set_device(rank)
-
-    dist.init_process_group(
-        backend="nccl",
-        rank=rank,
-        world_size=world_size,
-    )
+    dist.init_process_group(backend="nccl")
 
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(42)
@@ -48,3 +40,6 @@ def all_gather(t: torch.Tensor) -> list[torch.Tensor]:
     ]
     dist.all_gather(gathered_tensors, t)
     return gathered_tensors
+
+def cleanup():
+    dist.destroy_process_group()
