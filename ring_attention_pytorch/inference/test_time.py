@@ -1,99 +1,163 @@
 # This script can be used to compare the runtimes of ring attention, striped ring attention, flash attention, and eager attention.
-# Example: python test_time.py --runtimes ring striped_ring
+# Example: python test_time.py --runtime ring striped_ring
 
 import time
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from distributed import get_world_size
+import torch.multiprocessing as mp
 import argparse
+import os
+import torch.distributed as dist
 
-from ring_attention_pytorch.inference.attention_variants import RingAttentionLlama, Attention
+from ring_attention_pytorch.inference.attention_variants import (
+    RingAttentionLlama,
+    Attention,
+)
+from ring_attention_pytorch.inference.distributed import cleanup
+
+
+def setup(
+    rank,
+    world_size,
+):
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = "12355"
+
+    backend = "nccl"
+    dist.init_process_group(backend, rank=rank, world_size=world_size)
+
+    torch.cuda.set_device(rank)
+
 
 @torch.inference_mode()
-def benchmark_attention(model, name, input):
-    for _ in range(10):
-        _ = model.forward_attention(input)
-    torch.cuda.synchronize()
+def benchmark_attention(
+    rank,
+    world_size,
+    batch_size,
+    seq_len,
+    attn_implementation,
+    dim,
+    n_heads,
+    n_kv_heads,
+    dtype,
+    num_iters,
+):
+    setup(rank, world_size)
+    print(f"rank {rank} started")
 
-    times = []
-    for _ in range(num_iters):
+    try:
+        torch.manual_seed(42)
+        torch.cuda.manual_seed_all(42)
+        dtype = getattr(torch, dtype)
+        input = torch.randn(batch_size, seq_len, dim, dtype=dtype)
+
+        attention = None
+        if attn_implementation == "ring":
+            attention = RingAttentionLlama(
+                n_heads=n_heads,
+                n_kv_heads=n_kv_heads,
+                dim=dim,
+                max_seq_len=seq_len,
+                ring_size=world_size,
+                rotary_embed=True,
+                use_striped=False,
+            )
+        elif attn_implementation == "striped_ring":
+            attention = RingAttentionLlama(
+                n_heads=n_heads,
+                n_kv_heads=n_kv_heads,
+                dim=dim,
+                max_seq_len=seq_len,
+                ring_size=world_size,
+                rotary_embed=True,
+                use_striped=True,
+            )
+        elif attn_implementation == "eager":
+            attention = Attention(
+                n_heads=n_heads,
+                n_kv_heads=n_kv_heads,
+                dim=dim,
+                max_seq_len=seq_len,
+                use_flash=False,
+                rotary_embed=True,
+            )
+        elif attn_implementation == "flash":
+            attention = Attention(
+                n_heads=n_heads,
+                n_kv_heads=n_kv_heads,
+                dim=dim,
+                max_seq_len=seq_len,
+                use_flash=True,
+                rotary_embed=True,
+            )
+        else:
+            raise ValueError(f"Unknown attention implementation: {attn_implementation}")
+
+        attention = attention.to(dtype)
+        input = input.cuda(rank)
+        attention = attention.cuda(rank)
+
+        for _ in range(10):
+            _ = attention.forward_attention(input)
         torch.cuda.synchronize()
-        start = time.time()
-        _ = model.forward_attention(input)
-        torch.cuda.synchronize()
-        end = time.time()
-        times.append(end - start)
-    avg_time = sum(times) / len(times)
-    print(f"{name}: {avg_time * 1000:.3f} ms")
-    return avg_time
+
+        times = []
+        for _ in range(num_iters):
+            torch.cuda.synchronize()
+            start = time.time()
+            _ = attention.forward_attention(input)
+            torch.cuda.synchronize()
+            end = time.time()
+            times.append(end - start)
+        avg_time = sum(times) / len(times)
+        print(f"{attn_implementation}: {avg_time * 1000:.3f} ms")
+        return avg_time
+    finally:
+        cleanup()
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Benchmark attention variants")
     parser.add_argument(
-        "--runtimes", 
-        type=str, 
-        nargs="+", 
-        default=["ring", "striped_ring", "flash", "eager"],
-        help="Which attention runtimes to benchmark. Options: ring, striped_ring, flash, eager (all by default)"
+        "--runtime",
+        type=str,
+        help="Which attention runtimes to benchmark. Options: ring, striped_ring, flash, eager",
     )
+    parser.add_argument(
+        "--world-size",
+        type=int,
+        default=1,
+    )
+    parser.add_argument("--dtype", type=str, default="bfloat16")
     args = parser.parse_args()
     print("Timing attention modules...")
 
-    batch_size = 4
-    seq_len = 512
+    assert (
+        args.world_size <= torch.cuda.device_count()
+    ), f"world size {args.world_size} must be less than the number of cuda devices {torch.cuda.device_count()}"
+
+    if "ring" not in args.runtime:
+        assert args.world_size == 1
+
+    batch_size = 16
+    seq_len = 2048
     dim = 4096
     n_heads = 32
     n_kv_heads = 8
-    # device = "cuda"
-    device = "cpu"
     num_iters = 100
 
-    models = {}
-
-    if "ring" in args.runtimes:
-        models["Ring Attention"] = RingAttentionLlama(
-            n_heads=n_heads,
-            n_kv_heads=n_kv_heads,
-            dim=dim,
-            # bucket_size=512,      # for some reason this is in custom_model.py but idt the arg exists
-            ring_seq_size=512,
-            ring_size=get_world_size(),
-            use_striped=False,
-        ).to(device)
-
-    if "striped_ring" in args.runtimes:
-        models["Striped Ring Attention"] = RingAttentionLlama(
-            n_heads=n_heads,
-            n_kv_heads=n_kv_heads,
-            dim=dim,
-            # bucket_size=512,        # see above
-            ring_seq_size=512,
-            ring_size=get_world_size(),
-            use_striped=True,
-        ).to(device)
-
-    if "eager" in args.runtimes:
-        models["Eager Attention"] = Attention(
-            n_heads=n_heads,
-            n_kv_heads=n_kv_heads,
-            dim=dim,
-            rotary_embed=True,
-            max_seq_len=seq_len,
-            use_flash=False
-        ).to(device)
-
-    if "flash" in args.runtimes:
-        models["Flash Attention"] = Attention(
-            n_heads=n_heads,
-            n_kv_heads=n_kv_heads,
-            dim=dim,
-            rotary_embed=True,
-            max_seq_len=seq_len,
-            use_flash=True
-        ).to(device)
-
-    input = torch.randn(batch_size, seq_len, dim, device=device)
-
-    for name, model in models.items():
-        benchmark_attention(model, name, input, num_iters)
+    mp.spawn(
+        benchmark_attention,
+        args=(
+            args.world_size,
+            batch_size,
+            seq_len,
+            args.runtime,
+            dim,
+            n_heads,
+            n_kv_heads,
+            args.dtype,
+            num_iters,
+        ),
+        nprocs=args.world_size,
+        join=True,
+    )

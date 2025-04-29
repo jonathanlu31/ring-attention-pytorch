@@ -5,6 +5,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from attention_variants import Attention, RingAttentionLlama
+from ring_attention_pytorch.inference.distributed import cleanup
 
 
 def setup(
@@ -18,10 +19,6 @@ def setup(
     dist.init_process_group(backend, rank=rank, world_size=world_size)
 
     torch.cuda.set_device(rank)
-
-
-def cleanup():
-    dist.destroy_process_group()
 
 
 def start(

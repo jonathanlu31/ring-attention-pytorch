@@ -52,6 +52,7 @@ def start(
     setup(rank, world_size)
     torch.manual_seed(42)
     torch.cuda.manual_seed_all(42)
+    print(f"starting rank {rank}")
 
     with resources.files("ring_attention_pytorch.inference.ring_llama_params").joinpath(
         param_file
