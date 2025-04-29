@@ -10,6 +10,7 @@ from einops import rearrange
 
 from ring_attention_pytorch.inference.flash_attn_utils import _flash_attention_forward
 from ring_attention_pytorch.ring_flash_attention_cuda import ring_flash_attn_cuda
+from ring_attention_pytorch.inference.cache import DecodingCache
 
 ##############
 # Rotary Positional Embeddings
@@ -122,6 +123,7 @@ def maybe_pad_seq_and_mask(
     mask: torch.Tensor | None,
     pos: torch.Tensor,
     seq_size: int,
+    cache_pos: torch.Tensor | None = None,
     pad_value: int = 0,
 ):
     bsz, seq_len = x.shape[:2]
@@ -139,11 +141,18 @@ def maybe_pad_seq_and_mask(
 
     mask, _ = pad_to_multiple(mask, seq_size, pad_value=False)
 
-    return (x, mask, pos), pad_length
+    if cache_pos is not None:
+        cache_pos, _ = pad_to_multiple(cache_pos, seq_size, pad_value=-1)
+
+    return (x, mask, pos, cache_pos), pad_length
 
 
 def shard_seq(
-    x: torch.Tensor, mask: torch.Tensor | None, pos: torch.Tensor, seq_size: int
+    x: torch.Tensor,
+    mask: torch.Tensor | None,
+    pos: torch.Tensor,
+    seq_size: int,
+    cache_pos: torch.Tensor | None = None,
 ):
     assert is_distributed()
     assert x.shape[1] % seq_size == 0
@@ -156,7 +165,11 @@ def shard_seq(
         mask_split = mask.split(seq_size, dim=1)
         mask = mask_split[rank]
 
-    return x, mask, pos
+    if cache_pos is not None:
+        cache_pos_split = cache_pos.split(seq_size, dim=1)
+        cache_pos = cache_pos_split[rank]
+
+    return x, mask, pos, cache_pos
 
 
 def join_seq(logits: torch.Tensor) -> torch.Tensor:
@@ -167,6 +180,7 @@ def join_seq(logits: torch.Tensor) -> torch.Tensor:
 class RingAttentionLlama(nn.Module):
     def __init__(
         self,
+        layer_id: int = -1,
         n_heads: int = 8,
         n_kv_heads: int | None = None,
         dim: int = 4096,
@@ -179,7 +193,8 @@ class RingAttentionLlama(nn.Module):
         dtype: torch.dtype = torch.bfloat16,
     ):
         super().__init__()
-        # whether to use flash attention cuda kernel
+        self.layer_id = layer_id
+
         self.n_heads = n_heads
         self.n_kv_heads = n_kv_heads
         assert self.n_heads % self.n_kv_heads == 0
@@ -271,7 +286,7 @@ class RingAttentionLlama(nn.Module):
             if mask is not None:
                 mask = rearrange(mask, "b (i j) -> b (j i)", i=ring_seq_size)
 
-        x, mask, pos = shard_seq(x, mask, pos, ring_seq_size)
+        x, mask, pos, _ = shard_seq(x, mask, pos, ring_seq_size)
         self.freqs_cis = self.freqs_cis.to(x.device)
         freqs_cis = self.freqs_cis[pos]
 
@@ -297,6 +312,7 @@ class RingAttentionLlama(nn.Module):
 class Attention(nn.Module):
     def __init__(
         self,
+        layer_id: int = -1,
         n_heads: int = 8,
         n_kv_heads: int | None = None,
         dim: int = 4096,
@@ -308,6 +324,8 @@ class Attention(nn.Module):
         dtype: torch.dtype = torch.bfloat16,
     ):
         super().__init__()
+        self.layer_id = layer_id
+
         self.n_kv_heads = n_heads if n_kv_heads is None else n_kv_heads
         world_size = 1
         self.n_local_heads = n_heads // world_size
@@ -333,28 +351,13 @@ class Attention(nn.Module):
         self.wo = nn.Linear(n_heads * self.head_dim, dim, bias=False, dtype=dtype)
         self.use_flash = use_flash
 
-        # self.cache_k = torch.zeros(
-        #     (
-        #         args.max_batch_size,
-        #         args.max_seq_len,
-        #         self.n_local_kv_heads,
-        #         self.head_dim,
-        #     )
-        # )
-        # self.cache_v = torch.zeros(
-        #     (
-        #         args.max_batch_size,
-        #         args.max_seq_len,
-        #         self.n_local_kv_heads,
-        #         self.head_dim,
-        #     )
-        # )
-
     def forward(
         self,
         x: torch.Tensor,
         freqs_cis: torch.Tensor,
         mask: torch.Tensor | None,
+        cache: DecodingCache | None = None,
+        cache_pos: torch.Tensor | None = None,
     ):
         bsz, seqlen, _ = x.shape
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
@@ -364,14 +367,10 @@ class Attention(nn.Module):
         xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
 
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
-        # self.cache_k = self.cache_k.to(xq)
-        # self.cache_v = self.cache_v.to(xq)
 
-        # self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
-        # self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
-
-        # keys = self.cache_k[:bsz, : start_pos + seqlen]
-        # values = self.cache_v[:bsz, : start_pos + seqlen]
+        if cache is not None:
+            assert cache_pos is not None
+            xk, xv = cache.update_and_get_kv(self.layer_id, xk, xv, cache_pos)
 
         if self.use_flash:
             output = _flash_attention_forward(

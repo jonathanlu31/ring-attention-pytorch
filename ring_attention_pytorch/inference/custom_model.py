@@ -29,6 +29,7 @@ from ring_attention_pytorch.inference.attention_variants import (
     precompute_freqs_cis,
     shard_seq,
 )
+from ring_attention_pytorch.inference.cache import DecodingCache
 
 
 class RMSNorm(torch.nn.Module):
@@ -81,6 +82,7 @@ class TransformerBlock(nn.Module):
         assert not args.use_striped or args.attn_implementation == "ring"
         if args.attn_implementation == "ring":
             self.attention = RingAttentionLlama(
+                layer_id=layer_id,
                 n_heads=args.n_heads,
                 n_kv_heads=args.n_kv_heads,
                 dim=args.dim,
@@ -90,6 +92,7 @@ class TransformerBlock(nn.Module):
             )
         elif args.attn_implementation == "flash":
             self.attention = Attention(
+                layer_id=layer_id,
                 n_heads=args.n_heads,
                 n_kv_heads=args.n_kv_heads,
                 dim=args.dim,
@@ -98,6 +101,7 @@ class TransformerBlock(nn.Module):
             )
         elif args.attn_implementation == "eager":
             self.attention = Attention(
+                layer_id=layer_id,
                 n_heads=args.n_heads,
                 n_kv_heads=args.n_kv_heads,
                 dim=args.dim,
@@ -125,8 +129,16 @@ class TransformerBlock(nn.Module):
         x: torch.Tensor,
         freqs_cis: torch.Tensor,
         mask: torch.Tensor | None,
+        cache: DecodingCache | None = None,
+        cache_pos: torch.Tensor | None = None,
     ):
-        h = x + self.attention(self.attention_norm(x), freqs_cis=freqs_cis, mask=mask)
+        h = x + self.attention(
+            self.attention_norm(x),
+            freqs_cis=freqs_cis,
+            mask=mask,
+            cache=cache,
+            cache_pos=cache_pos,
+        )
         out = h + self.feed_forward(self.ffn_norm(h))
         return out
 
@@ -168,6 +180,8 @@ class Transformer(nn.Module):
         tokens: torch.Tensor,
         attn_mask: torch.Tensor | None = None,
         input_pos: torch.Tensor | None = None,
+        cache: DecodingCache | None = None,
+        cache_pos: torch.Tensor | None = None,
         auto_shard_seq: bool = False,
     ):
         _bsz, seqlen = tokens.shape
@@ -178,8 +192,11 @@ class Transformer(nn.Module):
 
             # If batching, x, mask, and pos should already be padded to max seq len in the batch
             # This pads the sequence further to make it a multiple of ring_seq_size
-            (tokens, attn_mask, input_pos), pad_length = maybe_pad_seq_and_mask(
-                tokens, attn_mask, input_pos, ring_seq_size
+            # FIXME: technically, this masking doesn't do anything because causal and mask don't play well in this codebase.
+            (tokens, attn_mask, input_pos, cache_pos), pad_length = (
+                maybe_pad_seq_and_mask(
+                    tokens, attn_mask, input_pos, cache_pos, ring_seq_size
+                )
             )
 
             if self.params.use_striped:
@@ -191,8 +208,13 @@ class Transformer(nn.Module):
                         attn_mask, "b (i j) -> b (j i)", i=ring_seq_size
                     )
 
+                if cache_pos is not None:
+                    cache_pos = rearrange(
+                        cache_pos, "b (i j) -> b (j i)", i=ring_seq_size
+                    )
+
             tokens, attn_mask, input_pos = shard_seq(
-                tokens, attn_mask, input_pos, ring_seq_size
+                tokens, attn_mask, input_pos, cache_pos, ring_seq_size
             )
 
         self.freqs_cis = self.freqs_cis.to(tokens.device)
@@ -201,7 +223,9 @@ class Transformer(nn.Module):
         h = self.tok_embeddings(tokens)
 
         for layer in self.layers:
-            h = layer(h, freqs_cis=freqs_cis, mask=attn_mask)
+            h = layer(
+                h, freqs_cis=freqs_cis, mask=attn_mask, cache=cache, cache_pos=cache_pos
+            )
 
         h = self.norm(h)
         output = self.output(h).float()
@@ -214,6 +238,21 @@ class Transformer(nn.Module):
 
             return output[:, pad_length:]
         return output
+
+    def make_cache(
+        self, bsz: int, max_seqlen: int, device: torch.device
+    ) -> DecodingCache:
+        return DecodingCache(
+            n_layers=self.n_layers,
+            bsz=bsz,
+            max_seqlen=max_seqlen,
+            n_kv_heads=self.params.n_kv_heads,
+            head_dim=self.params.dim // self.params.n_heads,
+            device=device,
+            dtype=self.dtype,
+            use_ring=self.params.attn_implementation == "ring",
+            use_striped=self.params.use_striped,
+        )
 
 
 if __name__ == "__main__":

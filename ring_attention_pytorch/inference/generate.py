@@ -9,11 +9,13 @@ from pathlib import Path
 import distributed
 import torch
 import utils
-from args import ModelArgs
-from custom_model import Transformer
 from stats import Stats
 from torch.profiler import record_function
 from transformers import AutoTokenizer
+
+from ring_attention_pytorch.inference.args import ModelArgs
+from ring_attention_pytorch.inference.cache import DecodingCache
+from ring_attention_pytorch.inference.custom_model import Transformer
 
 
 @dataclass
@@ -115,7 +117,8 @@ class LLM:
         tokens: torch.Tensor,
         mask: torch.Tensor,
         input_pos: torch.Tensor,
-        cache,
+        cache: DecodingCache | None,
+        cache_pos: torch.Tensor | None,
         iter_num: int,
         use_cuda_graph: bool,
         auto_shard_seq: bool,
@@ -127,13 +130,15 @@ class LLM:
                     attn_mask=mask,
                     input_pos=input_pos,
                     auto_shard_seq=auto_shard_seq,
+                    cache=cache,
+                    cache_pos=cache_pos,
                 )
         else:
             with record_function("incremental_gen"):
                 if self.compiled_model is None:
                     if use_cuda_graph:
                         self.compiled_model = self._compile_model(
-                            tokens, mask, input_pos, cache=cache
+                            tokens, mask, input_pos, cache=cache, cache_pos=cache_pos
                         )
                     else:
                         self.compiled_model = self.model.forward
@@ -143,6 +148,8 @@ class LLM:
                     attn_mask=mask,
                     input_pos=input_pos,
                     auto_shard_seq=auto_shard_seq,
+                    cache=cache,
+                    cache_pos=cache_pos,
                 )
 
         return logits
@@ -163,17 +170,27 @@ class LLM:
 
         padded_inputs, mask, input_pos = utils.collate(prompt_tokens, self.device)
         max_prompt_len = padded_inputs.size()[1]
-        assert sampling_args.max_output_tokens + max_prompt_len < params.max_seq_len
+        max_len = sampling_args.max_output_tokens + max_prompt_len
+        assert max_len < params.max_seq_len
+        assert (
+            max_len % distributed.get_world_size() == 0
+        ), "Need to evenly split the KV cache"
 
         out_tokens = torch.zeros(
             (bsz, sampling_args.max_output_tokens), dtype=torch.long
         )
         eos_reached = torch.tensor([False] * bsz)
         cache = None
-        # cache = self.model.init_cache(
-        #     args=self.model_args,
-        #     length=bsz * max_seq_length,
-        # )
+        cache_pos = None
+        if use_cache:
+            cache = self.model.make_cache(
+                bsz=bsz,
+                max_seqlen=max_len,
+                device=self.device,
+            )
+            cache_pos = torch.arange(
+                max_prompt_len, device=self.device, dtype=torch.long
+            ).repeat(bsz, 1)
 
         stats = Stats()
         stats.phase("total")
@@ -184,6 +201,7 @@ class LLM:
                 mask,
                 input_pos,
                 cache,
+                cache_pos,
                 iter_num,
                 use_cuda_graph,
                 auto_shard_seq,
@@ -191,12 +209,13 @@ class LLM:
 
             next_token = utils.sample(logits, sampling_args.temperature)
 
-            out_tokens[:, iter_num] = next_token
+            out_tokens[:, iter_num] = next_token.squeeze()
             eos_reached |= (next_token == self.tokenizer.eos_token_id).squeeze()
             if use_cache:
                 cur_tokens = next_token
                 mask = None
-                input_pos = None
+                input_pos = input_pos[:, -1:] + 1
+                cache_pos = cache_pos[:, -1:] + 1
             else:
                 cur_tokens = torch.cat((cur_tokens, next_token), dim=1)
                 mask = torch.cat(
@@ -221,7 +240,13 @@ class LLM:
         return stats, responses
 
 
-def main(ckpt_dir: str, tokenizer_path: str, params_file: str, use_cuda_graph: bool, use_cache: bool):
+def main(
+    ckpt_dir: str,
+    tokenizer_path: str,
+    params_file: str,
+    use_cuda_graph: bool,
+    use_cache: bool,
+):
     if "WORLD_SIZE" in os.environ:
         world_size = int(os.environ["WORLD_SIZE"])
         local_rank = int(os.environ["LOCAL_RANK"])
@@ -272,6 +297,12 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     try:
-        main(args.ckpt_dir, args.tokenizer_path, args.params_file, args.use_cuda_graph, args.use_cache)
+        main(
+            args.ckpt_dir,
+            args.tokenizer_path,
+            args.params_file,
+            args.use_cuda_graph,
+            args.use_cache,
+        )
     finally:
         distributed.cleanup()
