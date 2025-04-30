@@ -15,6 +15,7 @@ from ring_attention_pytorch.ring import (
     get_rank,
     get_world_size
 )
+from ring_attention_pytorch.inference.cache import DecodingCache
 
 from beartype import beartype
 
@@ -65,7 +66,11 @@ class RingFlashAttentionCUDAFunction(Function):
         max_lookback_seq_len: int | None,
         ring_size: int | None,
         softclamp_qk_sim: bool,
-        softclamp_value: float
+        softclamp_value: float,
+        layer_id: int | None,
+        cache: DecodingCache | None,
+        cache_pos: Tensor | None,
+        use_fast_ring_decoding: bool,
     ):
         from ring_attention_pytorch.triton_flash_attn import flash_attn_forward
 
@@ -94,6 +99,9 @@ class RingFlashAttentionCUDAFunction(Function):
         cross_attn = q.shape[-3] != k.shape[-3]
         ring_reduce_col &= not cross_attn
         striped_ring_attn &= not cross_attn
+        is_decoding = cache is not None and q.shape[1] == 1
+        if is_decoding and use_fast_ring_decoding:
+            ring_reduce_col = False
 
         assert k.shape[-1] == v.shape[-1], 'for simplicity when doing ring passing, assume dim_values is equal to dim_queries_keys, majority of transformer do this, not a big issue'
 
@@ -135,17 +143,15 @@ class RingFlashAttentionCUDAFunction(Function):
         m = None
         lse = None
 
-        # receive buffers, to be alternated with sent buffer
-
-        receive_kv = None
-        receive_mask = None
-
         # non-causal and causal striped attention can have final normalization of output fused
 
         can_fuse_final_output_normalization = not causal or (causal and striped_ring_attn)
 
-        for (ring_rank, (is_first, is_last)), (kv, mask) in ring_pass_fn(kv, mask, receive_buffers = (receive_kv, receive_mask), max_iters = max_ring_passes, ring_size = ring_size):
+        for (ring_rank, (is_first, is_last)), (kv, mask, cache_pos) in ring_pass_fn(kv, mask, cache_pos, max_iters = max_ring_passes, ring_size = ring_size):
             k, v = kv
+
+            if cache:
+                k, v = cache.update_and_get_kv(layer_id, k, v, cache_pos)
 
             # account for grouped query attention
             k, v = repeat_kv(k, q_head_groups), repeat_kv(v, q_head_groups)
@@ -375,6 +381,10 @@ def ring_flash_attn_cuda(
     max_lookback_seq_len: int | None = None,
     ring_size: int | None = None,
     softclamp_qk_sim: bool = False,
-    softclamp_value: float = 50.
+    softclamp_value: float = 50.,
+    layer_id: int | None = None,
+    cache: DecodingCache | None = None,
+    cache_pos: Tensor | None = None,
+    use_fast_ring_decoding: bool = False
 ):
-    return ring_flash_attn_cuda_(q, k, v, mask, causal, ring_reduce_col, striped_ring_attn, max_lookback_seq_len, ring_size, softclamp_qk_sim, softclamp_value)
+    return ring_flash_attn_cuda_(q, k, v, mask, causal, ring_reduce_col, striped_ring_attn, max_lookback_seq_len, ring_size, softclamp_qk_sim, softclamp_value, layer_id, cache, cache_pos, use_fast_ring_decoding)

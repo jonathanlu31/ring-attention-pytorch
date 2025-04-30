@@ -79,7 +79,7 @@ pip install click
 Then, testing flash attention would be:
 
 ```bash
-python assert_flash.py --causal
+python assert_flash.py --causal --cuda-kernel
 ```
 
 Alternatively, after installing and setting up the conda environment, you can use the sbatch script in scripts to avoid wasting usage in interactive mode.

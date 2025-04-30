@@ -122,6 +122,7 @@ class LLM:
         iter_num: int,
         use_cuda_graph: bool,
         auto_shard_seq: bool,
+        use_fast_ring_decoding: bool,
     ):
         if iter_num == 0:
             with record_function("prefill"):
@@ -147,9 +148,10 @@ class LLM:
                     tokens=tokens,
                     attn_mask=mask,
                     input_pos=input_pos,
-                    auto_shard_seq=auto_shard_seq,
+                    auto_shard_seq=auto_shard_seq and cache is None,
                     cache=cache,
                     cache_pos=cache_pos,
+                    use_fast_ring_decoding=use_fast_ring_decoding,
                 )
 
         return logits
@@ -161,6 +163,7 @@ class LLM:
         sampling_args: SamplingArgs,
         use_cuda_graph: bool = True,
         use_cache: bool = True,
+        use_fast_ring_decoding: bool = False,
     ) -> tuple[Stats, list[list[int]]]:
         bsz = len(prompt_tokens)
         params = self.model.params
@@ -205,6 +208,7 @@ class LLM:
                 iter_num,
                 use_cuda_graph,
                 auto_shard_seq,
+                use_fast_ring_decoding,
             )
 
             next_token = utils.sample(logits, sampling_args.temperature)
@@ -246,6 +250,7 @@ def main(
     params_file: str,
     use_cuda_graph: bool,
     use_cache: bool,
+    use_fast_ring_decoding: bool,
 ):
     if "WORLD_SIZE" in os.environ:
         world_size = int(os.environ["WORLD_SIZE"])
@@ -253,6 +258,9 @@ def main(
     else:
         world_size = 1
         local_rank = 0
+
+    if use_fast_ring_decoding:
+        assert use_cache
 
     device = distributed.setup(world_size, local_rank)
 
@@ -274,6 +282,7 @@ def main(
         sampling_args,
         use_cuda_graph=use_cuda_graph,
         use_cache=use_cache,
+        use_fast_ring_decoding=use_fast_ring_decoding,
     )
 
     if distributed.get_rank() == 0:
@@ -294,6 +303,7 @@ if __name__ == "__main__":
     parser.add_argument("params_file")
     parser.add_argument("--use-cache", action="store_true")
     parser.add_argument("--use-cuda-graph", action="store_true")
+    parser.add_argument("--use-fast-ring-decoding", action="store_true")
 
     args = parser.parse_args()
     try:
@@ -303,6 +313,7 @@ if __name__ == "__main__":
             args.params_file,
             args.use_cuda_graph,
             args.use_cache,
+            args.use_fast_ring_decoding,
         )
     finally:
         distributed.cleanup()

@@ -5,7 +5,7 @@ from typing import Literal
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from distributed import all_gather, get_rank, is_distributed
+from ring_attention_pytorch.inference.distributed import all_gather, get_rank, is_distributed
 from einops import rearrange
 
 from ring_attention_pytorch.inference.flash_attn_utils import _flash_attention_forward
@@ -134,7 +134,7 @@ def maybe_pad_seq_and_mask(
     pos, _ = pad_to_multiple(pos, seq_size, pad_value=-1)
 
     if pad_length == 0:
-        return (x, mask, pos), pad_length
+        return (x, mask, pos, cache_pos), pad_length
 
     if mask is None:
         mask = torch.ones((bsz, seq_len), device=x.device).bool()
@@ -229,6 +229,9 @@ class RingAttentionLlama(nn.Module):
         x: torch.Tensor,
         freqs_cis: torch.Tensor,
         mask: torch.Tensor | None,
+        cache: DecodingCache | None = None,
+        cache_pos: torch.Tensor | None = None,
+        use_fast_ring_decoding: bool = False,
     ):
         """
         einstein notation
@@ -257,6 +260,10 @@ class RingAttentionLlama(nn.Module):
             ring_reduce_col=self.ring_size > 1,
             striped_ring_attn=self.use_striped,
             ring_size=self.ring_size,
+            layer_id=self.layer_id,
+            cache=cache,
+            cache_pos=cache_pos,
+            use_fast_ring_decoding=use_fast_ring_decoding,
         )
 
         # combine heads
@@ -277,7 +284,7 @@ class RingAttentionLlama(nn.Module):
 
         # If batching, x, mask, and pos should already be padded to max seq len in the batch
         # This pads the sequence further to make it a multiple of ring_seq_size
-        (x, mask, pos), pad_length = maybe_pad_seq_and_mask(x, mask, pos, ring_seq_size)
+        (x, mask, pos), pad_length = maybe_pad_seq_and_mask(x=x, mask=mask, pos=pos, seq_size=ring_seq_size)
 
         if self.use_striped:
             x = rearrange(x, "b (i j) d -> b (j i) d", i=ring_seq_size)
@@ -358,6 +365,7 @@ class Attention(nn.Module):
         mask: torch.Tensor | None,
         cache: DecodingCache | None = None,
         cache_pos: torch.Tensor | None = None,
+        use_fast_ring_decoding: bool = False,
     ):
         bsz, seqlen, _ = x.shape
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
@@ -368,7 +376,7 @@ class Attention(nn.Module):
 
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
-        if cache is not None:
+        if cache:
             assert cache_pos is not None
             xk, xv = cache.update_and_get_kv(self.layer_id, xk, xv, cache_pos)
 

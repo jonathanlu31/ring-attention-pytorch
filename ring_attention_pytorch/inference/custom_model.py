@@ -131,6 +131,7 @@ class TransformerBlock(nn.Module):
         mask: torch.Tensor | None,
         cache: DecodingCache | None = None,
         cache_pos: torch.Tensor | None = None,
+        use_fast_ring_decoding: bool = False,
     ):
         h = x + self.attention(
             self.attention_norm(x),
@@ -138,6 +139,7 @@ class TransformerBlock(nn.Module):
             mask=mask,
             cache=cache,
             cache_pos=cache_pos,
+            use_fast_ring_decoding=use_fast_ring_decoding,
         )
         out = h + self.feed_forward(self.ffn_norm(h))
         return out
@@ -183,6 +185,7 @@ class Transformer(nn.Module):
         cache: DecodingCache | None = None,
         cache_pos: torch.Tensor | None = None,
         auto_shard_seq: bool = False,
+        use_fast_ring_decoding: bool = False,
     ):
         _bsz, seqlen = tokens.shape
 
@@ -195,7 +198,11 @@ class Transformer(nn.Module):
             # FIXME: technically, this masking doesn't do anything because causal and mask don't play well in this codebase.
             (tokens, attn_mask, input_pos, cache_pos), pad_length = (
                 maybe_pad_seq_and_mask(
-                    tokens, attn_mask, input_pos, cache_pos, ring_seq_size
+                    x=tokens,
+                    mask=attn_mask,
+                    pos=input_pos,
+                    cache_pos=cache_pos,
+                    seq_size=ring_seq_size,
                 )
             )
 
@@ -213,8 +220,12 @@ class Transformer(nn.Module):
                         cache_pos, "b (i j) -> b (j i)", i=ring_seq_size
                     )
 
-            tokens, attn_mask, input_pos = shard_seq(
-                tokens, attn_mask, input_pos, cache_pos, ring_seq_size
+            tokens, attn_mask, input_pos, cache_pos = shard_seq(
+                x=tokens,
+                mask=attn_mask,
+                pos=input_pos,
+                cache_pos=cache_pos,
+                seq_size=ring_seq_size,
             )
 
         self.freqs_cis = self.freqs_cis.to(tokens.device)
@@ -224,7 +235,7 @@ class Transformer(nn.Module):
 
         for layer in self.layers:
             h = layer(
-                h, freqs_cis=freqs_cis, mask=attn_mask, cache=cache, cache_pos=cache_pos
+                h, freqs_cis=freqs_cis, mask=attn_mask, cache=cache, cache_pos=cache_pos, use_fast_ring_decoding=use_fast_ring_decoding
             )
 
         h = self.norm(h)

@@ -30,7 +30,7 @@ class DecodingCache:
     ):
         self.local_len = max_seqlen
         if use_ring:
-            self.local_len = max_seqlen / get_world_size()
+            self.local_len = max_seqlen // get_world_size()
             if use_striped:
                 raise NotImplementedError
 

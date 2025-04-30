@@ -82,11 +82,11 @@ RingInfo = namedtuple('RingInfo', ['ring_rank', 'iter_info'])
 def null_ring_pass(*tensors, max_iters = None, receive_buffers = None, ring_size = None):
     yield RingInfo(0, (True, True)), tensors
 
-def all_ring_pass(*tensors, max_iters = None, receive_buffers = None, ring_size = None):
+def all_ring_pass(*tensors, max_iters = None, ring_size = None):
     ring_size = default(ring_size, get_world_size())
     max_iters = default(max_iters, ring_size)
 
-    receive_buffers = cast_tuple(receive_buffers, len(tensors))
+    receive_buffers = ((None,) *  len(tensors))
 
     # make sure iteration is between 1 and world size
 
