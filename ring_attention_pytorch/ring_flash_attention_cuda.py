@@ -21,6 +21,8 @@ from beartype import beartype
 
 from einops import rearrange, repeat, reduce
 
+from ring_attention_pytorch.inference.distributed import all_gather
+
 # helpers
 
 def exists(v):
@@ -145,13 +147,20 @@ class RingFlashAttentionCUDAFunction(Function):
 
         # non-causal and causal striped attention can have final normalization of output fused
 
-        can_fuse_final_output_normalization = not causal or (causal and striped_ring_attn)
+        # can_fuse_final_output_normalization = not causal or (causal and striped_ring_attn) # TODO: Fix
+        can_fuse_final_output_normalization = False
 
+        # TODO: make this faster by sending all the tensors at once. Don't send each tensor in a separate send_receive_
         for (ring_rank, (is_first, is_last)), (kv, mask, cache_pos) in ring_pass_fn(kv, mask, cache_pos, max_iters = max_ring_passes, ring_size = ring_size):
             k, v = kv
 
             if cache:
-                k, v = cache.update_and_get_kv(layer_id, k, v, cache_pos)
+                if q_seq_len == 1 and is_first:
+                    # During decoding, you need to pull the cache on the first step
+                    k, v = cache.update_and_get_kv(layer_id, k, v, cache_pos)
+                elif q_seq_len > 1:
+                    # During prefill, you just compute attention over the kv you receive but you need to update your cache
+                    cache.update_kv(layer_id, k, v, cache_pos)
 
             # account for grouped query attention
             k, v = repeat_kv(k, q_head_groups), repeat_kv(v, q_head_groups)
@@ -195,11 +204,27 @@ class RingFlashAttentionCUDAFunction(Function):
                 softclamp_value = softclamp_value
             )
 
-        if not can_fuse_final_output_normalization:
-            m = m[..., :q_seq_len]
+        if use_fast_ring_decoding:
+            assert not can_fuse_final_output_normalization
+            # o should be shape [B, 1, H, D], m should be [B, H, 1], lse should be [B, H, 1]
+            o, m, lse = o[:, :q_seq_len], m[..., :q_seq_len], lse[..., :q_seq_len]
+            os, ms, lses = all_gather(o), all_gather(m), all_gather(lse)  # TODO: fix this to use only one all_gather
+            os, ms, lses = torch.stack(os), torch.stack(ms), torch.stack(lses)
 
-            o_scale = torch.exp(m - lse[..., :q_seq_len])
-            o.mul_(rearrange(o_scale, 'b h n -> b n h 1'))
+            m_max = torch.max(ms, dim=0, keepdim=True)[0]
+            m_max_norm = torch.exp(ms - m_max)
+
+            ses = torch.exp(lses - ms)
+            ses_norm = torch.sum(ses * m_max_norm, dim=0)  # [B, H, 1]
+
+            os = os * rearrange(m_max_norm, 'w b h n -> w b n h 1')
+            o = torch.sum(os, dim=0) / rearrange(ses_norm, 'b h n -> b n h 1')
+        else:
+            if not can_fuse_final_output_normalization:
+                m = m[..., :q_seq_len]
+
+                o_scale = torch.exp(m - lse[..., :q_seq_len])
+                o.mul_(rearrange(o_scale, 'b h n -> b n h 1'))
 
         ctx.args = (
             causal,

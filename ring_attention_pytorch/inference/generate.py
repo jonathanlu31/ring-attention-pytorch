@@ -5,8 +5,9 @@ import time
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
+from math import ceil
 
-import distributed
+from ring_attention_pytorch.inference.distributed import get_rank, get_world_size, setup, cleanup
 import torch
 import utils
 from stats import Stats
@@ -174,10 +175,8 @@ class LLM:
         padded_inputs, mask, input_pos = utils.collate(prompt_tokens, self.device)
         max_prompt_len = padded_inputs.size()[1]
         max_len = sampling_args.max_output_tokens + max_prompt_len
+        max_len = ceil(max_len / get_world_size()) * get_world_size()
         assert max_len < params.max_seq_len
-        assert (
-            max_len % distributed.get_world_size() == 0
-        ), "Need to evenly split the KV cache"
 
         out_tokens = torch.zeros(
             (bsz, sampling_args.max_output_tokens), dtype=torch.long
@@ -213,6 +212,8 @@ class LLM:
 
             next_token = utils.sample(logits, sampling_args.temperature)
 
+            # No need to shard the sequence during decoding
+            auto_shard_seq = False
             out_tokens[:, iter_num] = next_token.squeeze()
             eos_reached |= (next_token == self.tokenizer.eos_token_id).squeeze()
             if use_cache:
@@ -262,7 +263,7 @@ def main(
     if use_fast_ring_decoding:
         assert use_cache
 
-    device = distributed.setup(world_size, local_rank)
+    device = setup(world_size, local_rank)
 
     llama = LLM.build(ckpt_dir, tokenizer_path, params_file, device)
 
@@ -285,7 +286,7 @@ def main(
         use_fast_ring_decoding=use_fast_ring_decoding,
     )
 
-    if distributed.get_rank() == 0:
+    if get_rank() == 0:
         for i, prompt in enumerate(prompts):
             print(f"> {prompt}")
             answer = llama.tokenizer.decode(out_tokens[i])
@@ -316,4 +317,4 @@ if __name__ == "__main__":
             args.use_fast_ring_decoding,
         )
     finally:
-        distributed.cleanup()
+        cleanup()

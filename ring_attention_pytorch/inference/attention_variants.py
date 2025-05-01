@@ -256,7 +256,7 @@ class RingAttentionLlama(nn.Module):
             xk,
             xv,
             mask,
-            causal=True,
+            causal=seqlen > 1,
             ring_reduce_col=self.ring_size > 1,
             striped_ring_attn=self.use_striped,
             ring_size=self.ring_size,
