@@ -38,7 +38,11 @@ class DecodingCache:
         self.k_cache = torch.zeros(cache_shape, device=device, dtype=dtype)
         self.v_cache = torch.zeros(cache_shape, device=device, dtype=dtype)
         self.rank = get_rank()
-        self.max_seen_cache_pos = 0
+        
+        # All the layers will eventually be synced up, but since the KV cache is updated
+        # one layer at a time, we need separate trackers for each layer
+        # self.max_seen_cache_pos = 0
+        # self.max_seen_cache_pos = torch.zeros(n_layers, device=device, dtype=torch.int)
 
     @torch.no_grad()
     def update_kv(
@@ -56,17 +60,31 @@ class DecodingCache:
         )
 
         self.k_cache[layer_id, :, local_cache_indices[valid_local_idx_mask], :, :] = (
-            k_val[valid_local_idx_mask]
+            k_val[:, valid_local_idx_mask]
         )
         self.v_cache[layer_id, :, local_cache_indices[valid_local_idx_mask], :, :] = (
-            v_val[valid_local_idx_mask]
+            v_val[:, valid_local_idx_mask]
         )
 
-        valid_indices = local_cache_indices[valid_local_idx_mask]
-        self.max_seen_cache_pos = max(
-            self.max_seen_cache_pos,
-            (valid_indices.max() if valid_indices.numel() > 0 else 0),
-        )
+        # valid_indices = local_cache_indices[valid_local_idx_mask]
+        # self.max_seen_cache_pos = max(
+        #     self.max_seen_cache_pos,
+        #     (valid_indices.max() if valid_indices.numel() > 0 else 0),
+        # )
+
+    @torch.no_grad()
+    def update_kv_decoding(self, layer_id: int, k_val: torch.Tensor, v_val: torch.Tensor, cache_pos: torch.Tensor):
+        """This is needed for KV cache decoding with CUDA graphs because boolean masks are not allowed
+
+        Args:
+            layer_id (int)
+            k_val (torch.Tensor)
+            v_val (torch.Tensor)
+            cache_pos (torch.Tensor)
+        """
+        self.k_cache[layer_id, :, cache_pos, :, :] = k_val
+        self.v_cache[layer_id, :, cache_pos, :, :] = v_val
+        # self.max_seen_cache_pos = cache_pos[0]
 
     @torch.no_grad()
     def update_and_get_kv(
@@ -77,11 +95,23 @@ class DecodingCache:
         cache_pos: torch.Tensor,
     ):
         """Used externally during normal attention. Used externally during ring attention decoding.
+        
+        k_val, v_val: [B, S, H, D]
+        cache_pos: [S]. This is different from positional ids which indicates the position of each token within its own sequence. Cache_pos indicates where the token belongs in the cache, which includes padding tokens. Thus, the cache position of all tokens within a batch is the same.
         """
-        # k_val, v_val: [B, S, H, D]
+        assert k_val.shape[1] == v_val.shape[1] == len(cache_pos)
+        kv_len = k_val.shape[1]
+        
+        if kv_len == 1:
+            # the second clause only happens during the warmup calls with cuda graphs
+            # assert cache_pos[0] == self.max_seen_cache_pos[layer_id] + 1 or cache_pos[0] == self.max_seen_cache_pos[layer_id]
+            self.update_kv_decoding(layer_id, k_val, v_val, cache_pos)
+        else:
+            self.update_kv(layer_id, k_val, v_val, cache_pos)
 
-        self.update_kv(layer_id, k_val, v_val, cache_pos)
-        k_full = self.k_cache[layer_id, :, : self.max_seen_cache_pos + 1]
-        v_full = self.v_cache[layer_id, :, : self.max_seen_cache_pos + 1]
+        # k_full = self.k_cache[layer_id].narrow(1, 0, self.max_seen_cache_pos + 1)
+        # v_full = self.v_cache[layer_id].narrow(1, 0, self.max_seen_cache_pos + 1)
+        k_full = self.k_cache[layer_id, :, :cache_pos[-1] + 1]
+        v_full = self.v_cache[layer_id, :, :cache_pos[-1] + 1]
 
         return k_full, v_full

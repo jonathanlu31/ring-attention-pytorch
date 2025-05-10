@@ -56,8 +56,8 @@ class LLM:
         torch.set_default_dtype(dtype)
 
         model = Transformer(model_args)
-        checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=True)
-        model.load_state_dict(checkpoint, strict=True)
+        # checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+        # model.load_state_dict(checkpoint, strict=True)
         print(f"loaded model in {time.time() - start_time:.2f} seconds")
 
         return LLM(model_args, model, tokenizer, device, dtype)
@@ -79,33 +79,34 @@ class LLM:
 
     def _compile_model(
         self,
-        tokens_sliced: torch.Tensor,
-        mask: torch.Tensor,
+        tokens: torch.Tensor,
+        attn_mask: torch.Tensor,
         input_pos: torch.Tensor,
-        cache,
+        cache: DecodingCache | None = None,
+        cache_pos: torch.Tensor | None = None,
     ):
         self._compiled_inputs = tuple(
-            v.clone() for v in (tokens_sliced, mask, input_pos)
+            (v.clone() if isinstance(v, torch.Tensor) else v) for v in (tokens, attn_mask, input_pos, cache, cache_pos, False)
         )
 
-        original_cache = ...
         s = torch.cuda.Stream()
         s.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(s):
             for _ in range(2):  # warmup runs
                 _ = self.model.forward(*self._compiled_inputs)
         torch.cuda.current_stream().wait_stream(s)
-        # TODO: reset cache to original cache
 
         self._cuda_graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(self._cuda_graph):
             self._compiled_logits = self.model.forward(*self._compiled_inputs)
 
-        def replay(tokens, mask, input_pos: torch.Tensor, _cache):
+        def replay(tokens: torch.Tensor, attn_mask: torch.Tensor, input_pos: torch.Tensor, _cache: DecodingCache, cache_pos: torch.Tensor | None = None, auto_shard_seq: bool = False):
             # cache is not updated here because it is updated in-place in the model
             self._compiled_inputs[0].copy_(tokens)
-            self._compiled_inputs[1].copy_(mask)
+            self._compiled_inputs[1].copy_(attn_mask)
             self._compiled_inputs[2].copy_(input_pos)
+            if cache_pos is not None:
+                self._compiled_inputs[4].copy_(cache_pos)
 
             self._cuda_graph.replay()
 
@@ -140,7 +141,11 @@ class LLM:
                 if self.compiled_model is None:
                     if use_cuda_graph:
                         self.compiled_model = self._compile_model(
-                            tokens, mask, input_pos, cache=cache, cache_pos=cache_pos
+                            tokens=tokens,
+                            attn_mask=mask,
+                            input_pos=input_pos,
+                            cache=cache,
+                            cache_pos=cache_pos,
                         )
                     else:
                         self.compiled_model = self.model.forward
@@ -192,7 +197,7 @@ class LLM:
             )
             cache_pos = torch.arange(
                 max_prompt_len, device=self.device, dtype=torch.long
-            ).repeat(bsz, 1)
+            )
 
         stats = Stats()
         stats.phase("total")
@@ -220,7 +225,7 @@ class LLM:
                 cur_tokens = next_token
                 mask = None
                 input_pos = input_pos[:, -1:] + 1
-                cache_pos = cache_pos[:, -1:] + 1
+                cache_pos = cache_pos[-1:] + 1
             else:
                 cur_tokens = torch.cat((cur_tokens, next_token), dim=1)
                 mask = torch.cat(
