@@ -26,8 +26,6 @@ class SamplingArgs:
 
 
 class LLM:
-    GRAPH_WARMUPS: int = 3
-
     @staticmethod
     def build(
         ckpt_dir: str,
@@ -75,45 +73,8 @@ class LLM:
         self.tokenizer = tokenizer
         self.device = device
         self.dtype = dtype
-        self.compiled_model = None
 
-    def _compile_model(
-        self,
-        tokens_sliced: torch.Tensor,
-        mask: torch.Tensor,
-        input_pos: torch.Tensor,
-        cache,
-    ):
-        self._compiled_inputs = tuple(
-            v.clone() for v in (tokens_sliced, mask, input_pos)
-        )
-
-        original_cache = ...
-        s = torch.cuda.Stream()
-        s.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(s):
-            for _ in range(2):  # warmup runs
-                _ = self.model.forward(*self._compiled_inputs)
-        torch.cuda.current_stream().wait_stream(s)
-        # TODO: reset cache to original cache
-
-        self._cuda_graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(self._cuda_graph):
-            self._compiled_logits = self.model.forward(*self._compiled_inputs)
-
-        def replay(tokens, mask, input_pos: torch.Tensor, _cache):
-            # cache is not updated here because it is updated in-place in the model
-            self._compiled_inputs[0].copy_(tokens)
-            self._compiled_inputs[1].copy_(mask)
-            self._compiled_inputs[2].copy_(input_pos)
-
-            self._cuda_graph.replay()
-
-            return self._compiled_logits
-
-        return replay
-
-    def compile_and_call_model(
+    def call_model(
         self,
         tokens: torch.Tensor,
         mask: torch.Tensor,
@@ -121,7 +82,6 @@ class LLM:
         cache: DecodingCache | None,
         cache_pos: torch.Tensor | None,
         iter_num: int,
-        use_cuda_graph: bool,
         auto_shard_seq: bool,
         use_fast_ring_decoding: bool,
     ):
@@ -137,15 +97,7 @@ class LLM:
                 )
         else:
             with record_function("incremental_gen"):
-                if self.compiled_model is None:
-                    if use_cuda_graph:
-                        self.compiled_model = self._compile_model(
-                            tokens, mask, input_pos, cache=cache, cache_pos=cache_pos
-                        )
-                    else:
-                        self.compiled_model = self.model.forward
-
-                logits = self.compiled_model(
+                logits = self.model.forward(
                     tokens=tokens,
                     attn_mask=mask,
                     input_pos=input_pos,
@@ -162,7 +114,6 @@ class LLM:
         self,
         prompt_tokens: list[list[int]],
         sampling_args: SamplingArgs,
-        use_cuda_graph: bool = True,
         use_cache: bool = True,
         use_fast_ring_decoding: bool = False,
     ) -> tuple[Stats, list[list[int]]]:
@@ -198,14 +149,13 @@ class LLM:
         stats.phase("total")
         cur_tokens = padded_inputs
         for iter_num in range(sampling_args.max_output_tokens):
-            logits = self.compile_and_call_model(
+            logits = self.call_model(
                 cur_tokens,
                 mask,
                 input_pos,
                 cache,
                 cache_pos,
                 iter_num,
-                use_cuda_graph,
                 auto_shard_seq,
                 use_fast_ring_decoding,
             )
@@ -249,7 +199,6 @@ def main(
     ckpt_dir: str,
     tokenizer_path: str,
     params_file: str,
-    use_cuda_graph: bool,
     use_cache: bool,
     use_fast_ring_decoding: bool,
 ):
@@ -281,7 +230,6 @@ def main(
     stats, out_tokens = llama.generate(
         prompt_tokens,
         sampling_args,
-        use_cuda_graph=use_cuda_graph,
         use_cache=use_cache,
         use_fast_ring_decoding=use_fast_ring_decoding,
     )
@@ -303,7 +251,6 @@ if __name__ == "__main__":
     parser.add_argument("tokenizer_path")
     parser.add_argument("params_file")
     parser.add_argument("--use-cache", action="store_true")
-    parser.add_argument("--use-cuda-graph", action="store_true")
     parser.add_argument("--use-fast-ring-decoding", action="store_true")
 
     args = parser.parse_args()
@@ -312,7 +259,6 @@ if __name__ == "__main__":
             args.ckpt_dir,
             args.tokenizer_path,
             args.params_file,
-            args.use_cuda_graph,
             args.use_cache,
             args.use_fast_ring_decoding,
         )
