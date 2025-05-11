@@ -207,7 +207,7 @@ class Transformer(nn.Module):
             )
 
             if self.params.use_striped:
-                tokens = rearrange(tokens, "b (i j) d -> b (j i) d", i=ring_seq_size)
+                tokens = rearrange(tokens, "b (i j) -> b (j i)", i=ring_seq_size)
                 input_pos = rearrange(input_pos, "b (i j) -> b (j i)", i=ring_seq_size)
 
                 if attn_mask is not None:

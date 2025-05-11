@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from ring_attention_pytorch.inference.distributed import all_gather, get_rank, is_distributed
 from einops import rearrange
 
-from ring_attention_pytorch.inference.flash_attn_utils import _flash_attention_forward
+from ring_attention_pytorch.inference.flash_attn_utils import _flash_attention_forward as hf_flash_attention_forward
 from ring_attention_pytorch.ring_flash_attention_cuda import ring_flash_attn_cuda
 from ring_attention_pytorch.inference.cache import DecodingCache
 
@@ -284,7 +284,7 @@ class RingAttentionLlama(nn.Module):
 
         # If batching, x, mask, and pos should already be padded to max seq len in the batch
         # This pads the sequence further to make it a multiple of ring_seq_size
-        (x, mask, pos), pad_length = maybe_pad_seq_and_mask(x=x, mask=mask, pos=pos, seq_size=ring_seq_size)
+        (x, mask, pos, _), pad_length = maybe_pad_seq_and_mask(x=x, mask=mask, pos=pos, seq_size=ring_seq_size)
 
         if self.use_striped:
             x = rearrange(x, "b (i j) d -> b (j i) d", i=ring_seq_size)
@@ -381,7 +381,7 @@ class Attention(nn.Module):
             xk, xv = cache.update_and_get_kv(self.layer_id, xk, xv, cache_pos)
 
         if self.use_flash:
-            output = _flash_attention_forward(
+            output =  hf_flash_attention_forward(
                 xq, xk, xv, mask, query_length=xq.shape[1], is_causal=True
             )
         else:

@@ -39,6 +39,7 @@ assert pkg_version.parse(triton_version) >= pkg_version.parse('3.0.0'), f'triton
 import triton
 import triton.language as tl
 from triton.language.extra import libdevice
+from functools import partial
 
 # kernels
 

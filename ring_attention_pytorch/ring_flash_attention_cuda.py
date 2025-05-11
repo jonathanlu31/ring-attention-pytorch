@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from math import ceil
-
 import torch
-from torch import nn, einsum, Tensor
+from torch import Tensor
+import torch.nn.functional as F
 from torch.autograd.function import Function
 from torch.amp import autocast
 
@@ -16,6 +15,7 @@ from ring_attention_pytorch.ring import (
     get_world_size
 )
 from ring_attention_pytorch.inference.cache import DecodingCache
+from flash_attn.flash_attn_interface import _flash_attn_forward, _flash_attn_varlen_forward
 
 from beartype import beartype
 
@@ -50,6 +50,49 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
 # flash attention v1 - https://arxiv.org/abs/2205.14135
 # flash attention v2 - https://tridao.me/publications/flash2/flash2.pdf
 # ring attention - https://arxiv.org/abs/2310.01889
+
+@torch.jit.script
+def _update_out_and_lse(
+    out: torch.Tensor,
+    lse: torch.Tensor,
+    block_out: torch.Tensor,
+    block_lse: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+
+    block_out = block_out.to(torch.float32)
+    block_lse = block_lse.transpose(-2, -1).unsqueeze(dim=-1)
+
+    # new_lse = lse + torch.log(1 + torch.exp(block_lse - lse))
+    # torch.exp(lse - new_lse) * out + torch.exp(block_lse - new_lse) * block_out
+    # For additional context and discussion, please refer to:
+    # https://github.com/zhuzilin/ring-flash-attention/pull/34#issuecomment-2076126795
+    out = out - F.sigmoid(block_lse - lse) * (out - block_out)
+    lse = lse - F.logsigmoid(lse - block_lse)
+
+    return out, lse
+
+
+def update_out_and_lse(
+    out: torch.Tensor | None,
+    lse: torch.Tensor | None,
+    block_out: torch.Tensor,
+    block_lse: torch.Tensor,
+    slice_=None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if out is None:
+        if slice_ is not None:
+            raise RuntimeError("first update_out_and_lse should not pass slice_ args")
+        out = block_out.to(torch.float32)
+        lse = block_lse.transpose(-2, -1).unsqueeze(dim=-1)
+    elif slice_ is not None:
+        slice_out, slice_lse = out[slice_], lse[slice_]
+        slice_out, slice_lse = _update_out_and_lse(
+            slice_out, slice_lse, block_out, block_lse
+        )
+        out[slice_], lse[slice_] = slice_out, slice_lse
+    else:
+        out, lse = _update_out_and_lse(out, lse, block_out, block_lse)
+    return out, lse
 
 class RingFlashAttentionCUDAFunction(Function):
 
@@ -142,13 +185,9 @@ class RingFlashAttentionCUDAFunction(Function):
         # lse - logsumexp
 
         o = None
-        m = None
         lse = None
 
         # non-causal and causal striped attention can have final normalization of output fused
-
-        # can_fuse_final_output_normalization = not causal or (causal and striped_ring_attn) # TODO: Fix
-        can_fuse_final_output_normalization = False
 
         # TODO: make this faster by sending all the tensors at once. Don't send each tensor in a separate send_receive_
         for (ring_rank, (is_first, is_last)), (kv, mask, cache_pos) in ring_pass_fn(kv, mask, cache_pos, max_iters = max_ring_passes, ring_size = ring_size):
@@ -165,47 +204,49 @@ class RingFlashAttentionCUDAFunction(Function):
             # account for grouped query attention
             k, v = repeat_kv(k, q_head_groups), repeat_kv(v, q_head_groups)
 
-            # translate key padding mask to bias
-
-            bias = None
-
-            if exists(mask):
-                bias = torch.where(mask, 0.,  float('-inf'))
-
             # for non-striped attention
             # if the kv ring rank is equal to the current rank (block diagonal), then turn on causal
             # for striped attention, it is always causal, but a lt or gt sign needs to be changed to lte or gte within the cuda code, when determining masking out
 
-            block_causal = False
-            causal_mask_diagonal = False
+            use_causal = False
+            slice_ = None
+            q_input = q
+            k_input = k
+            v_input = v
 
             if causal:
                 if striped_ring_attn:
-                    block_causal = True
-                    causal_mask_diagonal = get_rank() < ring_rank
+                    use_causal = True
+                    if get_rank() < ring_rank:
+                        q_input = q_input[:, 1:]
+                        k_input = k_input[:, :-1]
+                        v_input = v_input[:, :-1]
+                        slice_ = (slice(None), slice(1, None))
                 else:
-                    block_causal = get_rank() == ring_rank
+                    use_causal = get_rank() == ring_rank
 
                     if get_rank() < ring_rank:
                         continue
 
-            o, m, lse = flash_attn_forward(
-                q, k, v,
-                causal = block_causal,
-                o = o,
-                m = m,
-                lse = lse,
-                bias = bias,
-                softmax_scale = softmax_scale,
-                causal_mask_diagonal = causal_mask_diagonal,
-                return_normalized_output = can_fuse_final_output_normalization and is_last,
-                load_accumulated = not is_first,
-                softclamp_qk_sim = softclamp_qk_sim,
-                softclamp_value = softclamp_value
+            outputs = _flash_attn_forward(
+                q=q_input,
+                k=k_input,
+                v=v_input,
+                causal=use_causal,
+                dropout_p=0.0,
+                softmax_scale=softmax_scale,
+                window_size_left=-1,
+                window_size_right=-1,
+                softcap=0.0,
+                alibi_slopes=None,
+                return_softmax=False,
             )
+            assert len(outputs) == 4
+            block_out, block_lse, _, _ = outputs
+
+            o, lse = update_out_and_lse(o, lse, block_out, block_lse, slice_)
 
         if use_fast_ring_decoding:
-            assert not can_fuse_final_output_normalization
             # o should be shape [B, 1, H, D], m should be [B, H, 1], lse should be [B, H, 1]
             o, m, lse = o[:, :q_seq_len], m[..., :q_seq_len], lse[..., :q_seq_len]
             os, ms, lses = all_gather(o), all_gather(m), all_gather(lse)  # TODO: fix this to use only one all_gather
@@ -219,12 +260,6 @@ class RingFlashAttentionCUDAFunction(Function):
 
             os = os * rearrange(m_max_norm, 'w b h n -> w b n h 1')
             o = torch.sum(os, dim=0) / rearrange(ses_norm, 'b h n -> b n h 1')
-        else:
-            if not can_fuse_final_output_normalization:
-                m = m[..., :q_seq_len]
-
-                o_scale = torch.exp(m - lse[..., :q_seq_len])
-                o.mul_(rearrange(o_scale, 'b h n -> b n h 1'))
 
         ctx.args = (
             causal,
