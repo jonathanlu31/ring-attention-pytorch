@@ -57,3 +57,6 @@ Ring 4 GPU cache:
 Ring 1 GPU cache + fast:
 Ring 2 GPU cache + fast: 70.6
 Ring 4 GPU cache + fast: 70.3
+
+# TODO:
+Final bug might be the masking
