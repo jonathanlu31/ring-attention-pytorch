@@ -150,6 +150,11 @@ if __name__ == "__main__":
         type=int,
         default=2048,
     )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=2,
+    )
     parser.add_argument("--dtype", type=str, default="bfloat16")
     parser.add_argument(
         "--profile",
@@ -166,8 +171,9 @@ if __name__ == "__main__":
     if "ring" not in args.runtime:
         assert args.world_size == 1
 
-    batch_size = 16
+    #batch_size = 2
     #seq_len = 2048
+    batch_size = args.batch_size
     seq_len = args.seq_len
     dim = 4096
     n_heads = 32
