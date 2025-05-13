@@ -1,15 +1,32 @@
+## Setup
+
+Download Llama3.1-8B-Instruct from https://www.llama.com/llama-downloads/.
+
+Get access to [Llama-3.1-8B-Instruct from HuggingFace](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct).
+```bash
+huggingface-cli login
+```
+
+Move Llama3.1-8B-Instruct to $SCRATCH
+
 ## Usage
 
 For `generate.py`:
 ```bash
-torchrun --nproc_per_node 3 generate.py /data/jonathan/models/llama-models/Llama-3.1-8B-Instruct/ meta-llama/Llama-3.1-8B-Instruct 3.1_8B_ring.json
+torchrun --nproc_per_node 3 generate.py <path_to_llama_model> meta-llama/Llama-3.1-8B-Instruct 3.1_8B_ring.json
 ```
 
 The first argument is the path to checkpoint directory for the Llama weights. The second argument is the tokenizer path for HuggingFace. The third is any of the params files in ring_llama_params. 
 
 For normal, no sequence parallelism, you'd run:
 ```bash
-torchrun --nproc_per_node 1 generate.py /data/jonathan/models/llama-models/Llama-3.1-8B-Instruct/ meta-llama/Llama-3.1-8B-Instruct 3.1_8B.json
+torchrun --nproc_per_node 1 generate.py <path_to_llama_model> meta-llama/Llama-3.1-8B-Instruct 3.1_8B.json
+```
+
+### NERSC Usage:
+
+```bash
+srun --gpus=1 torchrun --nproc_per_node 1 generate.py $SCRATCH/models/Llama3.1-8B-Instruct/ meta-llama/Llama-3.1-8B-Instruct 3.1_8B.json
 ```
 
 ## Testing

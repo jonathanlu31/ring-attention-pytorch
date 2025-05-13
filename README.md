@@ -74,6 +74,9 @@ First install the package
 ```bash
 pip install -e .
 pip install click
+pip install transformers
+pip install llama-stack
+pip install flash-attn --no-build-isolation
 ```
 
 Then, testing flash attention would be:
