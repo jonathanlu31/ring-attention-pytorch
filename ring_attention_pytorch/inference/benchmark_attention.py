@@ -8,6 +8,8 @@ import argparse
 import os
 import torch.distributed as dist
 
+import torch.profiler
+
 from ring_attention_pytorch.inference.attention_variants import (
     RingAttentionLlama,
     Attention,
@@ -40,6 +42,7 @@ def benchmark_attention(
     n_kv_heads,
     dtype,
     num_iters,
+    profile=False
 ):
     setup(rank, world_size)
     print(f"rank {rank} started")
@@ -100,17 +103,31 @@ def benchmark_attention(
             _ = attention.forward_attention(input)
         torch.cuda.synchronize()
 
-        times = []
-        for _ in range(num_iters):
-            torch.cuda.synchronize()
-            start = time.time()
-            _ = attention.forward_attention(input)
-            torch.cuda.synchronize()
-            end = time.time()
-            times.append(end - start)
-        avg_time = sum(times) / len(times)
-        print(f"{attn_implementation}: {avg_time * 1000:.3f} ms")
-        return avg_time
+        if profile:
+            with torch.profiler.profile(
+                activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+                schedule=torch.profiler.schedule(wait=0, warmup=1, active=5),
+                on_trace_ready=torch.profiler.tensorboard_trace_handler(f"./logs/{attn_implementation}_rank{rank}"),
+                record_shapes=True,
+                with_stack=True
+            ) as prof:
+                for i in range(num_iters):
+                    _ = attention.forward_attention(input)
+                    prof.step()
+        
+        else:
+            times = []
+            for _ in range(num_iters):
+                torch.cuda.synchronize()
+                start = time.time()
+                _ = attention.forward_attention(input)
+                torch.cuda.synchronize()
+                end = time.time()
+                times.append(end - start)
+            avg_time = sum(times) / len(times)
+            print(f"{attn_implementation}: {avg_time * 1000:.3f} ms")
+            return avg_time
+
     finally:
         cleanup()
 
@@ -128,6 +145,11 @@ if __name__ == "__main__":
         default=1,
     )
     parser.add_argument("--dtype", type=str, default="bfloat16")
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="Enable PyTorch profiling. Defaults to False.",
+    )
     args = parser.parse_args()
     print("Timing attention modules...")
 
@@ -157,6 +179,7 @@ if __name__ == "__main__":
             n_kv_heads,
             args.dtype,
             num_iters,
+            args.profile
         ),
         nprocs=args.world_size,
         join=True,
