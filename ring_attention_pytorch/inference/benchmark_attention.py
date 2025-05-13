@@ -125,6 +125,7 @@ def benchmark_attention(
                 end = time.time()
                 times.append(end - start)
             avg_time = sum(times) / len(times)
+            print(f"Sequence Length: {seq_len}")
             print(f"{attn_implementation}: {avg_time * 1000:.3f} ms")
             return avg_time
 
@@ -144,6 +145,11 @@ if __name__ == "__main__":
         type=int,
         default=1,
     )
+    parser.add_argument(
+        "--seq_len",
+        type=int,
+        default=2048,
+    )
     parser.add_argument("--dtype", type=str, default="bfloat16")
     parser.add_argument(
         "--profile",
@@ -161,7 +167,8 @@ if __name__ == "__main__":
         assert args.world_size == 1
 
     batch_size = 16
-    seq_len = 2048
+    #seq_len = 2048
+    seq_len = args.seq_len
     dim = 4096
     n_heads = 32
     n_kv_heads = 8
