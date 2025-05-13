@@ -14,6 +14,8 @@ class DecodingCache:
     every forward pass. Each layer reads/writes to the same object independently.
 
     KV vectors are read/written *after* positional embeddings are applied.
+
+    NOTE: THIS CACHE DOES NOT WORK CORRECTLY FOR BATCHING! THIS IS FAKE BATCHING!
     """
 
     def __init__(
@@ -34,11 +36,12 @@ class DecodingCache:
             if use_striped:
                 raise NotImplementedError
 
+        self.bsz = bsz
         cache_shape = (n_layers, bsz, self.local_len, n_kv_heads, head_dim)
         self.k_cache = torch.zeros(cache_shape, device=device, dtype=dtype)
         self.v_cache = torch.zeros(cache_shape, device=device, dtype=dtype)
         self.rank = get_rank()
-        self.max_seen_cache_pos = 0
+        self.max_seen_cache_pos = -1
 
     @torch.no_grad()
     def update_kv(
@@ -65,7 +68,7 @@ class DecodingCache:
         valid_indices = local_cache_indices[valid_local_idx_mask]
         self.max_seen_cache_pos = max(
             self.max_seen_cache_pos,
-            (valid_indices.max() if valid_indices.numel() > 0 else 0),
+            (valid_indices.max() if valid_indices.numel() > 0 else -1),
         )
 
     @torch.no_grad()
@@ -76,12 +79,13 @@ class DecodingCache:
         v_val: torch.Tensor,
         cache_pos: torch.Tensor,
     ):
-        """Used externally during normal attention. Used externally during ring attention decoding.
-        """
+        """Used externally during normal attention. Used externally during ring attention decoding."""
         # k_val, v_val: [B, S, H, D]
 
         self.update_kv(layer_id, k_val, v_val, cache_pos)
-        k_full = self.k_cache[layer_id, :, : self.max_seen_cache_pos + 1]
-        v_full = self.v_cache[layer_id, :, : self.max_seen_cache_pos + 1]
+        k_full = self.k_cache[layer_id]
+        v_full = self.v_cache[layer_id]
+        cache_mask = torch.zeros((self.local_len,), device=self.k_cache.device)
+        cache_mask[: self.max_seen_cache_pos + 1] = 1
 
-        return k_full, v_full
+        return k_full, v_full, cache_mask.bool()

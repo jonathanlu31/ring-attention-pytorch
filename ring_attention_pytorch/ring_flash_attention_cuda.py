@@ -12,10 +12,13 @@ from ring_attention_pytorch.ring import (
     null_ring_pass,
     one_ring_pass,
     get_rank,
-    get_world_size
+    get_world_size,
 )
 from ring_attention_pytorch.inference.cache import DecodingCache
-from flash_attn.flash_attn_interface import _flash_attn_forward, _flash_attn_varlen_forward
+from flash_attn.flash_attn_interface import (
+    _flash_attn_forward,
+    _flash_attn_varlen_forward,
+)
 
 from beartype import beartype
 
@@ -25,14 +28,18 @@ from ring_attention_pytorch.inference.distributed import all_gather
 
 # helpers
 
+
 def exists(v):
     return v is not None
+
 
 def default(val, d):
     return val if exists(val) else d
 
+
 def divisible_by(num, den):
     return (num % den) == 0
+
 
 def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     """torch.repeat_interleave(x, dim=2, repeats=n_rep)"""
@@ -45,11 +52,13 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
         .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
     )
 
+
 # ring + (flash) attention forwards and backwards
 
 # flash attention v1 - https://arxiv.org/abs/2205.14135
 # flash attention v2 - https://tridao.me/publications/flash2/flash2.pdf
 # ring attention - https://arxiv.org/abs/2310.01889
+
 
 @torch.jit.script
 def _update_out_and_lse(
@@ -58,7 +67,6 @@ def _update_out_and_lse(
     block_out: torch.Tensor,
     block_lse: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-
     block_out = block_out.to(torch.float32)
     block_lse = block_lse.transpose(-2, -1).unsqueeze(dim=-1)
 
@@ -79,11 +87,15 @@ def update_out_and_lse(
     block_lse: torch.Tensor,
     slice_=None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if out is None:
+    if out is None or (torch.all(out == 0) and torch.all(torch.isinf(lse))):
         if slice_ is not None:
             raise RuntimeError("first update_out_and_lse should not pass slice_ args")
         out = block_out.to(torch.float32)
         lse = block_lse.transpose(-2, -1).unsqueeze(dim=-1)
+    elif torch.all(block_out == 0) and torch.all(torch.isinf(block_lse)):
+        # If there's an empty block, corresponding to an empty KV cache on a particular device, it should
+        # have no impact on the output
+        return out, lse
     elif slice_ is not None:
         slice_out, slice_lse = out[slice_], lse[slice_]
         slice_out, slice_lse = _update_out_and_lse(
@@ -94,8 +106,8 @@ def update_out_and_lse(
         out, lse = _update_out_and_lse(out, lse, block_out, block_lse)
     return out, lse
 
-class RingFlashAttentionCUDAFunction(Function):
 
+class RingFlashAttentionCUDAFunction(Function):
     @staticmethod
     @torch.no_grad()
     def forward(
@@ -117,6 +129,9 @@ class RingFlashAttentionCUDAFunction(Function):
         cache_pos: Tensor | None,
         use_fast_ring_decoding: bool,
     ):
+        # q shape: [B, q_seq_len, H, D]
+        # k shape: [B, kv_seq_len, H, D]
+        # v shape: [B, kv_seq_len, H, D]
         from ring_attention_pytorch.triton_flash_attn import flash_attn_forward
 
         assert k.shape[-2:] == v.shape[-2:]
@@ -125,7 +140,7 @@ class RingFlashAttentionCUDAFunction(Function):
         assert divisible_by(q_heads, kv_heads)
         q_head_groups = q_heads // kv_heads
 
-        assert all([t.is_cuda for t in (q, k, v)]), 'inputs must be all on cuda'
+        assert all([t.is_cuda for t in (q, k, v)]), "inputs must be all on cuda"
 
         dtype = q.dtype
         softmax_scale = q.shape[-1] ** -0.5
@@ -145,17 +160,21 @@ class RingFlashAttentionCUDAFunction(Function):
         ring_reduce_col &= not cross_attn
         striped_ring_attn &= not cross_attn
         is_decoding = cache is not None and q.shape[1] == 1
+        assert not (is_decoding and causal), "Decoding doesn't use causal"
+
         if is_decoding and use_fast_ring_decoding:
             ring_reduce_col = False
 
-        assert k.shape[-1] == v.shape[-1], 'for simplicity when doing ring passing, assume dim_values is equal to dim_queries_keys, majority of transformer do this, not a big issue'
+        assert k.shape[-1] == v.shape[-1], (
+            "for simplicity when doing ring passing, assume dim_values is equal to dim_queries_keys, majority of transformer do this, not a big issue"
+        )
 
         # per_machine_seq_size = k.shape[-3]
 
         # calculate max ring passes
 
         max_ring_passes = None
-        num_lookback_buckets = float('inf')
+        num_lookback_buckets = float("inf")
 
         # if exists(max_lookback_seq_len):
         #     assert causal
@@ -176,6 +195,10 @@ class RingFlashAttentionCUDAFunction(Function):
 
         ring_pass_fn = all_ring_pass if ring_reduce_col else null_ring_pass
 
+        cache_mask = None
+        if is_decoding:
+            k, v, cache_mask = cache.update_and_get_kv(layer_id, k, v, cache_pos)
+
         kv = torch.stack((k, v))
 
         # accumulated values
@@ -190,16 +213,26 @@ class RingFlashAttentionCUDAFunction(Function):
         # non-causal and causal striped attention can have final normalization of output fused
 
         # TODO: make this faster by sending all the tensors at once. Don't send each tensor in a separate send_receive_
-        for (ring_rank, (is_first, is_last)), (kv, mask, cache_pos) in ring_pass_fn(kv, mask, cache_pos, max_iters = max_ring_passes, ring_size = ring_size):
+        for (ring_rank, (is_first, is_last)), (
+            kv,
+            mask,
+            cache_pos,
+            cache_mask,
+        ) in ring_pass_fn(
+            kv,
+            mask,
+            cache_pos,
+            cache_mask,
+            max_iters=max_ring_passes,
+            ring_size=ring_size,
+        ):
             k, v = kv
+            if cache_mask is not None:
+                k, v = k[:, cache_mask], v[:, cache_mask]
 
-            if cache:
-                if q_seq_len == 1 and is_first:
-                    # During decoding, you need to pull the cache on the first step
-                    k, v = cache.update_and_get_kv(layer_id, k, v, cache_pos)
-                elif q_seq_len > 1:
-                    # During prefill, you just compute attention over the kv you receive but you need to update your cache
-                    cache.update_kv(layer_id, k, v, cache_pos)
+            if cache and q_seq_len > 1:
+                # During prefill, you just compute attention over the kv you receive but you need to update your cache
+                cache.update_kv(layer_id, k, v, cache_pos)
 
             # account for grouped query attention
             k, v = repeat_kv(k, q_head_groups), repeat_kv(v, q_head_groups)
@@ -243,23 +276,31 @@ class RingFlashAttentionCUDAFunction(Function):
             )
             assert len(outputs) == 4
             block_out, block_lse, _, _ = outputs
+            # block_lse [B, H, seq_len]
 
             o, lse = update_out_and_lse(o, lse, block_out, block_lse, slice_)
 
         if use_fast_ring_decoding:
-            # o should be shape [B, 1, H, D], m should be [B, H, 1], lse should be [B, H, 1]
-            o, m, lse = o[:, :q_seq_len], m[..., :q_seq_len], lse[..., :q_seq_len]
-            os, ms, lses = all_gather(o), all_gather(m), all_gather(lse)  # TODO: fix this to use only one all_gather
-            os, ms, lses = torch.stack(os), torch.stack(ms), torch.stack(lses)
+            # o is shape [B, 1, H, D], lse is shape [B, 1, H, 1]
+            B, _, H, D = o.shape
+            block_o, block_lse = o[:, :q_seq_len], lse[:, :q_seq_len]
+            o_flat, lse_flat = (
+                block_o.view(o.shape[0], -1),
+                block_lse.view(lse.shape[0], -1),
+            )
+            combined = torch.cat((o_flat, lse_flat), dim=-1)  # [B, total_feature_dim]
+            gathered = all_gather(combined)  # [world_size, B, total_feature_dim]
+            gathered = torch.stack(gathered)
 
-            m_max = torch.max(ms, dim=0, keepdim=True)[0]
-            m_max_norm = torch.exp(ms - m_max)
+            os_flat, lses_flat = gathered[:, :, :o_flat.shape[1]], gathered[:, :, o_flat.shape[1]:]
+            os, lses = os_flat.view(-1, B, 1, H, D), lses_flat.view(-1, B, 1, H, 1)
 
-            ses = torch.exp(lses - ms)
-            ses_norm = torch.sum(ses * m_max_norm, dim=0)  # [B, H, 1]
+            # Replace +inf with -inf in lses
+            lses = torch.where(torch.isinf(lses) & (lses > 0), torch.full_like(lses, float('-inf')), lses)
 
-            os = os * rearrange(m_max_norm, 'w b h n -> w b n h 1')
-            o = torch.sum(os, dim=0) / rearrange(ses_norm, 'b h n -> b n h 1')
+            new_lse = torch.logsumexp(lses, dim=0, keepdim=True)
+            renormalized_os = torch.exp(lses - new_lse) * os
+            o = torch.sum(renormalized_os, dim=0)
 
         ctx.args = (
             causal,
@@ -274,7 +315,7 @@ class RingFlashAttentionCUDAFunction(Function):
             q_head_groups,
             softclamp_qk_sim,
             softclamp_value,
-            dtype
+            dtype,
         )
 
         ctx.save_for_backward(q, orig_k, orig_v, o, lse)
@@ -287,7 +328,6 @@ class RingFlashAttentionCUDAFunction(Function):
     @staticmethod
     @torch.no_grad()
     def backward(ctx, do):
-
         from ring_attention_pytorch.triton_flash_attn import flash_attn_backward
 
         (
@@ -303,7 +343,7 @@ class RingFlashAttentionCUDAFunction(Function):
             q_head_groups,
             softclamp_qk_sim,
             softclamp_value,
-            dtype
+            dtype,
         ) = ctx.args
 
         q, k, v, o, lse = ctx.saved_tensors
@@ -324,9 +364,9 @@ class RingFlashAttentionCUDAFunction(Function):
 
         device = q.device
 
-        dq = torch.zeros(q.shape, device = device, dtype = torch.float32)
-        dk = torch.zeros_like(k, device = device)
-        dv = torch.zeros_like(v, device = device)
+        dq = torch.zeros(q.shape, device=device, dtype=torch.float32)
+        dk = torch.zeros_like(k, device=device)
+        dv = torch.zeros_like(v, device=device)
 
         # k and v will have 16 bits, and dk and dv can also be accumulated safely with the same type, i think
 
@@ -344,21 +384,31 @@ class RingFlashAttentionCUDAFunction(Function):
 
         delta = None
 
-        for (ring_rank, _), ((kv_and_dkv, mask), (receive_kv_and_dkv, receive_mask)) in ring_pass_fn(kv_and_dkv, mask, receive_buffers = (receive_kv_and_dkv, receive_mask), max_iters = max_ring_passes, ring_size = ring_size):
-
+        for (ring_rank, _), (
+            (kv_and_dkv, mask),
+            (receive_kv_and_dkv, receive_mask),
+        ) in ring_pass_fn(
+            kv_and_dkv,
+            mask,
+            receive_buffers=(receive_kv_and_dkv, receive_mask),
+            max_iters=max_ring_passes,
+            ring_size=ring_size,
+        ):
             k, v, dk, dv = kv_and_dkv
 
             # account for grouped query attention
 
-            k, v = map(lambda t: repeat(t, '... h d -> ... (g h) d', g = q_head_groups), (k, v))
+            k, v = map(
+                lambda t: repeat(t, "... h d -> ... (g h) d", g=q_head_groups), (k, v)
+            )
 
             # translate key padding mask to bias
 
             bias = None
 
             if exists(mask):
-                bias = torch.where(mask, 0., float('-inf'))
-                bias = rearrange(bias, 'b j -> b 1 1 j')
+                bias = torch.where(mask, 0.0, float("-inf"))
+                bias = rearrange(bias, "b j -> b 1 1 j")
 
             # determine whether to do causal mask or not
             # depends on whether it is striped attention, as well as current machine rank vs ring rank
@@ -379,7 +429,7 @@ class RingFlashAttentionCUDAFunction(Function):
             # use flash attention backwards kernel to calculate dq, dk, dv and accumulate
 
             if need_accum:
-                ring_dq = torch.empty(q.shape, device = device, dtype = torch.float32)
+                ring_dq = torch.empty(q.shape, device=device, dtype=torch.float32)
                 ring_dk = torch.empty_like(k)
                 ring_dv = torch.empty_like(v)
 
@@ -394,19 +444,23 @@ class RingFlashAttentionCUDAFunction(Function):
                         ring_dq,
                         ring_dk,
                         ring_dv,
-                        delta = delta,
-                        bias = bias,
-                        causal = block_causal,
-                        causal_mask_diagonal = causal_mask_diagonal,
-                        softmax_scale = softmax_scale,
-                        softclamp_qk_sim = softclamp_qk_sim,
-                        softclamp_value = softclamp_value,
+                        delta=delta,
+                        bias=bias,
+                        causal=block_causal,
+                        causal_mask_diagonal=causal_mask_diagonal,
+                        softmax_scale=softmax_scale,
+                        softclamp_qk_sim=softclamp_qk_sim,
+                        softclamp_value=softclamp_value,
                     )
 
                 # account for grouped query attention
 
-                ring_dk = reduce(ring_dk, '... (g h) d -> ... h d', g = q_head_groups, reduction = 'sum')
-                ring_dv = reduce(ring_dv, '... (g h) d -> ... h d', g = q_head_groups, reduction = 'sum')
+                ring_dk = reduce(
+                    ring_dk, "... (g h) d -> ... h d", g=q_head_groups, reduction="sum"
+                )
+                ring_dv = reduce(
+                    ring_dv, "... (g h) d -> ... h d", g=q_head_groups, reduction="sum"
+                )
 
                 dq.add_(ring_dq)
                 dk.add_(ring_dk)
@@ -426,9 +480,11 @@ class RingFlashAttentionCUDAFunction(Function):
 
         return dq, dk, dv, None, None, None, None, None, None, None, None, None
 
+
 ring_flash_attn_cuda_ = RingFlashAttentionCUDAFunction.apply
 
-@autocast('cuda', enabled = False)
+
+@autocast("cuda", enabled=False)
 @beartype
 def ring_flash_attn_cuda(
     q: Tensor,
@@ -441,10 +497,26 @@ def ring_flash_attn_cuda(
     max_lookback_seq_len: int | None = None,
     ring_size: int | None = None,
     softclamp_qk_sim: bool = False,
-    softclamp_value: float = 50.,
+    softclamp_value: float = 50.0,
     layer_id: int | None = None,
     cache: DecodingCache | None = None,
     cache_pos: Tensor | None = None,
-    use_fast_ring_decoding: bool = False
+    use_fast_ring_decoding: bool = False,
 ):
-    return ring_flash_attn_cuda_(q, k, v, mask, causal, ring_reduce_col, striped_ring_attn, max_lookback_seq_len, ring_size, softclamp_qk_sim, softclamp_value, layer_id, cache, cache_pos, use_fast_ring_decoding)
+    return ring_flash_attn_cuda_(
+        q,
+        k,
+        v,
+        mask,
+        causal,
+        ring_reduce_col,
+        striped_ring_attn,
+        max_lookback_seq_len,
+        ring_size,
+        softclamp_qk_sim,
+        softclamp_value,
+        layer_id,
+        cache,
+        cache_pos,
+        use_fast_ring_decoding,
+    )

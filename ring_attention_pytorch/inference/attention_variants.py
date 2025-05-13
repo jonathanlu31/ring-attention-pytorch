@@ -378,7 +378,8 @@ class Attention(nn.Module):
 
         if cache:
             assert cache_pos is not None
-            xk, xv = cache.update_and_get_kv(self.layer_id, xk, xv, cache_pos)
+            xk, xv, cache_mask = cache.update_and_get_kv(self.layer_id, xk, xv, cache_pos)
+            xk, xv = xk[:, cache_mask], xv[:, cache_mask]
 
         if self.use_flash:
             output =  hf_flash_attention_forward(
