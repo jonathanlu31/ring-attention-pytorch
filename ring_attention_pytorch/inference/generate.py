@@ -114,7 +114,6 @@ class LLM:
         self,
         prompt_tokens: list[list[int]],
         sampling_args: SamplingArgs,
-        max_seq_len: int,
         use_cache: bool = True,
         use_fast_ring_decoding: bool = False,
     ) -> tuple[Stats, list[list[int]]]:
@@ -128,8 +127,7 @@ class LLM:
         max_prompt_len = padded_inputs.size()[1]
         max_len = sampling_args.max_output_tokens + max_prompt_len
         max_len = ceil(max_len / get_world_size()) * get_world_size()
-        #assert max_len < params.max_seq_len
-        assert max_len < max_seq_len
+        assert max_len < params.max_seq_len
 
         out_tokens = torch.zeros(
             (bsz, sampling_args.max_output_tokens), dtype=torch.long
@@ -203,7 +201,7 @@ def main(
     params_file: str,
     use_cache: bool,
     use_fast_ring_decoding: bool,
-    max_seq_len: int = 2048,
+    max_completion_tokens: int = 512,
     context_len: int = 32000,
 ):
     if "WORLD_SIZE" in os.environ:
@@ -231,13 +229,12 @@ def main(
         )
         for prompt in prompts
     ]
-    sampling_args = SamplingArgs(temperature=0)
+    sampling_args = SamplingArgs(temperature=0, max_output_tokens=max_completion_tokens)
     stats, out_tokens = llama.generate(
         prompt_tokens,
         sampling_args,
         use_cache=use_cache,
         use_fast_ring_decoding=use_fast_ring_decoding,
-        max_seq_len=max_seq_len,
     )
 
     if get_rank() == 0:
@@ -259,8 +256,8 @@ if __name__ == "__main__":
     parser.add_argument("params_file")
     parser.add_argument("--use-cache", action="store_true")
     parser.add_argument("--use-fast-ring-decoding", action="store_true")
-    parser.add_argument("--max_seq_len",type=int,default=2048,)
-    parser.add_argument("--context_len",type=int,default=32000,)
+    parser.add_argument("--context-len",type=int,default=32000,)
+    parser.add_argument("--max-completion-tokens", type=int, default=512)
     args = parser.parse_args()
     try:
         main(
@@ -269,7 +266,7 @@ if __name__ == "__main__":
             args.params_file,
             args.use_cache,
             args.use_fast_ring_decoding,
-            args.max_seq_len,
+            args.max_completion_tokens,
             args.context_len,
         )
     finally:
