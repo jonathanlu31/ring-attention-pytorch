@@ -106,14 +106,17 @@ def benchmark_attention(
         if profile:
             with torch.profiler.profile(
                 activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
-                schedule=torch.profiler.schedule(wait=0, warmup=1, active=5),
-                on_trace_ready=torch.profiler.tensorboard_trace_handler(f"./logs/{attn_implementation}_rank{rank}"),
+                schedule=torch.profiler.schedule(wait=0, warmup=1, active=5, repeat=1),
                 record_shapes=True,
                 with_stack=True
             ) as prof:
-                for i in range(num_iters):
-                    _ = attention.forward_attention(input)
+                for i in range(6):
+                    with torch.profiler.record_function("forward_attention"):
+                        _ = attention.forward_attention(input)
                     prof.step()
+
+            prof.export_chrome_trace(f"./logs/{attn_implementation}_rank{rank}_seq_len{seq_len}.json")
+            print(prof.key_averages().table(sort_by='cuda_time_total', row_limit=10))
         
         else:
             times = []
