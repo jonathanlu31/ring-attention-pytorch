@@ -6,11 +6,16 @@ from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 from math import ceil
+from contextlib import nullcontext
 
-from ring_attention_pytorch.inference.distributed import get_rank, get_world_size, setup, cleanup
+from ring_attention_pytorch.inference.distributed import (
+    get_rank,
+    get_world_size,
+    setup,
+    cleanup,
+)
 import torch
 import utils
-from stats import Stats
 from torch.profiler import record_function
 from transformers import AutoTokenizer
 
@@ -85,7 +90,7 @@ class LLM:
         auto_shard_seq: bool,
         use_fast_ring_decoding: bool,
     ):
-        if iter_num == 0:
+        if tokens.shape[1] > 1:
             with record_function("prefill"):
                 logits = self.model.forward(
                     tokens=tokens,
@@ -116,7 +121,7 @@ class LLM:
         sampling_args: SamplingArgs,
         use_cache: bool = True,
         use_fast_ring_decoding: bool = False,
-    ) -> tuple[Stats, list[list[int]]]:
+    ) -> list[list[int]]:
         bsz = len(prompt_tokens)
         params = self.model.params
         auto_shard_seq = False
@@ -145,8 +150,6 @@ class LLM:
                 max_prompt_len, device=self.device, dtype=torch.long
             ).repeat(bsz, 1)
 
-        stats = Stats()
-        stats.phase("total")
         cur_tokens = padded_inputs
         for iter_num in range(sampling_args.max_output_tokens):
             logits = self.call_model(
@@ -161,12 +164,11 @@ class LLM:
             )
 
             next_token = utils.sample(logits, sampling_args.temperature)
-
-            # No need to shard the sequence during decoding
-            auto_shard_seq = False
             out_tokens[:, iter_num] = next_token.squeeze()
             eos_reached |= (next_token == self.tokenizer.eos_token_id).squeeze()
             if use_cache:
+                # No need to shard the sequence during decoding
+                auto_shard_seq = False
                 cur_tokens = next_token
                 mask = None
                 input_pos = input_pos[:, -1:] + 1
@@ -182,8 +184,6 @@ class LLM:
             if all(eos_reached):
                 break
 
-        stats.end_phase(tokens=(iter_num + 1) * bsz)
-
         responses = []
         for tokens in out_tokens.tolist():
             if self.tokenizer.eos_token_id in tokens:
@@ -192,7 +192,7 @@ class LLM:
                 )
             else:
                 responses.append(tokens)
-        return stats, responses
+        return responses
 
 
 def main(
@@ -201,6 +201,7 @@ def main(
     params_file: str,
     use_cache: bool,
     use_fast_ring_decoding: bool,
+    profile: bool,
 ):
     if "WORLD_SIZE" in os.environ:
         world_size = int(os.environ["WORLD_SIZE"])
@@ -213,6 +214,7 @@ def main(
         assert use_cache
 
     device = setup(world_size, local_rank)
+    warmup_iterations = 1
 
     llama = LLM.build(ckpt_dir, tokenizer_path, params_file, device)
 
@@ -226,13 +228,48 @@ def main(
         )
         for prompt in prompts
     ]
+
     sampling_args = SamplingArgs(temperature=0)
-    stats, out_tokens = llama.generate(
-        prompt_tokens,
-        sampling_args,
-        use_cache=use_cache,
-        use_fast_ring_decoding=use_fast_ring_decoding,
-    )
+    if profile:
+        sampling_args.max_output_tokens = 5
+
+    for i in range(warmup_iterations):
+        print(f"Warmup iteration {i+1}")
+        _ = llama.generate(
+            prompt_tokens,
+            sampling_args,
+            use_cache=use_cache,
+            use_fast_ring_decoding=use_fast_ring_decoding,
+        )
+
+    # Ensure GPU operations have completed
+    torch.cuda.synchronize()
+
+    # Benchmark Iterations
+    start_time = time.perf_counter()
+    total_tokens = 0
+    with torch.profiler.profile(
+        record_shapes=True,
+    ) if profile else nullcontext() as prof:
+        out_tokens = llama.generate(
+            prompt_tokens,
+            sampling_args,
+            use_cache=use_cache,
+            use_fast_ring_decoding=use_fast_ring_decoding,
+        )
+        total_tokens += sum(len(tokens) for tokens in out_tokens)
+
+    # Ensure GPU operations have completed
+    torch.cuda.synchronize()
+
+    end_time = time.perf_counter()
+    elapsed_time = end_time - start_time
+    tokens_per_second = total_tokens / elapsed_time
+
+    if prof:
+        prof.export_chrome_trace(
+            f"./logs/rank{local_rank}_generate_{llama.model_args.attn_implementation}_{'cache' if use_cache else 'no_cache'}_{'fast' if use_fast_ring_decoding else 'slow'}.json"
+        )
 
     if get_rank() == 0:
         for i, prompt in enumerate(prompts):
@@ -241,8 +278,7 @@ def main(
             print(answer)
             print("---------------")
 
-        for phase_stats in stats.phases:
-            print(phase_stats.show())
+        print(f"Tokens per second: {tokens_per_second:.2f} tokens/sec")
 
 
 if __name__ == "__main__":
@@ -252,6 +288,7 @@ if __name__ == "__main__":
     parser.add_argument("params_file")
     parser.add_argument("--use-cache", action="store_true")
     parser.add_argument("--use-fast-ring-decoding", action="store_true")
+    parser.add_argument("--profile", action="store_true")
 
     args = parser.parse_args()
     try:
@@ -261,6 +298,7 @@ if __name__ == "__main__":
             args.params_file,
             args.use_cache,
             args.use_fast_ring_decoding,
+            args.profile,
         )
     finally:
         cleanup()
