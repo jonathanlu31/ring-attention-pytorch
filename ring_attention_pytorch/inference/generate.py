@@ -204,6 +204,7 @@ def main(
     use_cache: bool,
     use_fast_ring_decoding: bool,
     max_seq_len: bool,
+    context_len: bool,
 ):
     if "WORLD_SIZE" in os.environ:
         world_size = int(os.environ["WORLD_SIZE"])
@@ -219,7 +220,8 @@ def main(
 
     llama = LLM.build(ckpt_dir, tokenizer_path, params_file, device)
 
-    with open("prompts.jsonl", "r") as f:
+    #with open("prompts.jsonl", "r") as f:
+    with open(f"prompt_{context_len}_tokens.jsonl", "r") as f:
         prompts = [json.loads(line) for line in f]
 
     prompt_tokens = [
@@ -257,6 +259,7 @@ if __name__ == "__main__":
     parser.add_argument("--use-cache", action="store_true")
     parser.add_argument("--use-fast-ring-decoding", action="store_true")
     parser.add_argument("--max_seq_len",type=int,default=2048,)
+    parser.add_argument("--context_len",type=int,default=32000,)
     args = parser.parse_args()
     try:
         main(
@@ -266,6 +269,7 @@ if __name__ == "__main__":
             args.use_cache,
             args.use_fast_ring_decoding,
             args.max_seq_len,
+            args.context_len,
         )
     finally:
         cleanup()
