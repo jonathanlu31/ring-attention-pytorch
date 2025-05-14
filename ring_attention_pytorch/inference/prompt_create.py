@@ -25,7 +25,7 @@ def make_long_prompt(base_text, target_tokens):
 # 4. Generate and save prompts of different lengths
 for target_len in [32000, 50000, 64000, 75000, 100000]:
     repeated_text = make_long_prompt(text, target_len)
-    instruction = "\n\nRepeat 10 to 100 words from within the text."
+    instruction = "\n\nRepeat the entire text."
     prompt = repeated_text + instruction
 
     # Save as JSONL

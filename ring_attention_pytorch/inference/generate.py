@@ -114,9 +114,9 @@ class LLM:
         self,
         prompt_tokens: list[list[int]],
         sampling_args: SamplingArgs,
+        max_seq_len: int,
         use_cache: bool = True,
         use_fast_ring_decoding: bool = False,
-        max_seq_len: bool,
     ) -> tuple[Stats, list[list[int]]]:
         bsz = len(prompt_tokens)
         params = self.model.params
@@ -203,8 +203,8 @@ def main(
     params_file: str,
     use_cache: bool,
     use_fast_ring_decoding: bool,
-    max_seq_len: bool,
-    context_len: bool,
+    max_seq_len: int = 2048,
+    context_len: int = 32000,
 ):
     if "WORLD_SIZE" in os.environ:
         world_size = int(os.environ["WORLD_SIZE"])
@@ -237,6 +237,7 @@ def main(
         sampling_args,
         use_cache=use_cache,
         use_fast_ring_decoding=use_fast_ring_decoding,
+        max_seq_len=max_seq_len,
     )
 
     if get_rank() == 0:
