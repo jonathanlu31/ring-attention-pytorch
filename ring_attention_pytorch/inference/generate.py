@@ -116,6 +116,7 @@ class LLM:
         sampling_args: SamplingArgs,
         use_cache: bool = True,
         use_fast_ring_decoding: bool = False,
+        max_seq_len: bool,
     ) -> tuple[Stats, list[list[int]]]:
         bsz = len(prompt_tokens)
         params = self.model.params
@@ -127,7 +128,8 @@ class LLM:
         max_prompt_len = padded_inputs.size()[1]
         max_len = sampling_args.max_output_tokens + max_prompt_len
         max_len = ceil(max_len / get_world_size()) * get_world_size()
-        assert max_len < params.max_seq_len
+        #assert max_len < params.max_seq_len
+        assert max_len < max_seq_len
 
         out_tokens = torch.zeros(
             (bsz, sampling_args.max_output_tokens), dtype=torch.long
@@ -201,6 +203,7 @@ def main(
     params_file: str,
     use_cache: bool,
     use_fast_ring_decoding: bool,
+    max_seq_len: bool,
 ):
     if "WORLD_SIZE" in os.environ:
         world_size = int(os.environ["WORLD_SIZE"])
@@ -236,6 +239,7 @@ def main(
 
     if get_rank() == 0:
         for i, prompt in enumerate(prompts):
+            print(f"Generating prompt with a max sequence length of: {max_seq_len}")
             print(f"> {prompt}")
             answer = llama.tokenizer.decode(out_tokens[i])
             print(answer)
@@ -252,7 +256,7 @@ if __name__ == "__main__":
     parser.add_argument("params_file")
     parser.add_argument("--use-cache", action="store_true")
     parser.add_argument("--use-fast-ring-decoding", action="store_true")
-
+    parser.add_argument("--max_seq_len",type=int,default=2048,)
     args = parser.parse_args()
     try:
         main(
@@ -261,6 +265,7 @@ if __name__ == "__main__":
             args.params_file,
             args.use_cache,
             args.use_fast_ring_decoding,
+            args.max_seq_len,
         )
     finally:
         cleanup()
