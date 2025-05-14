@@ -241,7 +241,10 @@ class Transformer(nn.Module):
         h = self.norm(h)
         output = self.output(h).float()
 
-        if auto_shard_seq:
+        if cache:
+            output = output[:, -1:].contiguous()
+            torch.distributed.broadcast(output, src=get_world_size() - 1)
+        elif auto_shard_seq:
             output = join_seq(output)
 
             if self.params.use_striped:

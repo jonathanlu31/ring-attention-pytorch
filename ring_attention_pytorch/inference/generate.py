@@ -220,8 +220,10 @@ def main(
 
     llama = LLM.build(ckpt_dir, tokenizer_path, params_file, device)
 
+    # with open("prompts.jsonl", "r") as f:
+    #     prompts = [json.loads(line) for line in f]
     with open(f"prompt_{context_len}_tokens.jsonl", "r") as f:
-        prompts = [json.loads(line) for line in f]
+        prompts = [[json.loads(line)] for line in f]
 
     prompt_tokens = [
         llama.tokenizer.apply_chat_template(
@@ -234,19 +236,20 @@ def main(
     if profile:
         sampling_args.max_output_tokens = 5
 
-    for i in range(warmup_iterations):
-        print(f"Warmup iteration {i+1}")
-        _ = llama.generate(
-            prompt_tokens,
-            sampling_args,
-            use_cache=use_cache,
-            use_fast_ring_decoding=use_fast_ring_decoding,
-        )
+        for i in range(warmup_iterations):
+            print(f"Warmup iteration {i+1}")
+            _ = llama.generate(
+                prompt_tokens,
+                sampling_args,
+                use_cache=use_cache,
+                use_fast_ring_decoding=use_fast_ring_decoding,
+            )
 
     # Ensure GPU operations have completed
     torch.cuda.synchronize()
 
     # Benchmark Iterations
+    print("Start main generation")
     start_time = time.perf_counter()
     total_tokens = 0
     with torch.profiler.profile(
@@ -274,12 +277,15 @@ def main(
 
     if get_rank() == 0:
         for i, prompt in enumerate(prompts):
-            print(f"Generating prompt with a max sequence length of: {max_seq_len}")
-            print(f"> {prompt}")
-            answer = llama.tokenizer.decode(out_tokens[i])
-            print(answer)
-            print("---------------")
+            if len(prompt[0]['content']) < 200:
+                print(f"> {prompt}")
+            if len(out_tokens[i]) < 200:
+                answer = llama.tokenizer.decode(out_tokens[i])
+                print(answer)
+                print("---------------")
 
+        print(f"Total tokens: {total_tokens}")
+        print(f"Elapsed time: {elapsed_time:.2f} seconds")
         print(f"Tokens per second: {tokens_per_second:.2f} tokens/sec")
 
 
