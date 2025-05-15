@@ -10,5 +10,6 @@
     "rope_theta": 500000.0,
     "use_scaled_rope": true,
     "attn_implementation": "flash",
-    "use_striped": false
+    "use_striped": false,
+    "max_seq_len": 131072
 }

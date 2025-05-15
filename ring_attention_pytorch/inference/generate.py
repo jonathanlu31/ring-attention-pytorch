@@ -201,7 +201,9 @@ def main(
     params_file: str,
     use_cache: bool,
     use_fast_ring_decoding: bool,
-    profile: bool,
+    max_completion_tokens: int = 512,
+    context_len: int = 32000,
+    profile: bool = False,
 ):
     if "WORLD_SIZE" in os.environ:
         world_size = int(os.environ["WORLD_SIZE"])
@@ -218,8 +220,10 @@ def main(
 
     llama = LLM.build(ckpt_dir, tokenizer_path, params_file, device)
 
-    with open("prompts.jsonl", "r") as f:
-        prompts = [json.loads(line) for line in f]
+    # with open("prompts.jsonl", "r") as f:
+    #     prompts = [json.loads(line) for line in f]
+    with open(f"prompt_{context_len}_tokens.jsonl", "r") as f:
+        prompts = [[json.loads(line)] for line in f]
 
     prompt_tokens = [
         llama.tokenizer.apply_chat_template(
@@ -228,24 +232,24 @@ def main(
         )
         for prompt in prompts
     ]
-
-    sampling_args = SamplingArgs(temperature=0)
+    sampling_args = SamplingArgs(temperature=0, max_output_tokens=max_completion_tokens)
     if profile:
         sampling_args.max_output_tokens = 5
 
-    for i in range(warmup_iterations):
-        print(f"Warmup iteration {i+1}")
-        _ = llama.generate(
-            prompt_tokens,
-            sampling_args,
-            use_cache=use_cache,
-            use_fast_ring_decoding=use_fast_ring_decoding,
-        )
+        for i in range(warmup_iterations):
+            print(f"Warmup iteration {i+1}")
+            _ = llama.generate(
+                prompt_tokens,
+                sampling_args,
+                use_cache=use_cache,
+                use_fast_ring_decoding=use_fast_ring_decoding,
+            )
 
     # Ensure GPU operations have completed
     torch.cuda.synchronize()
 
     # Benchmark Iterations
+    print("Start main generation")
     start_time = time.perf_counter()
     total_tokens = 0
     with torch.profiler.profile(
@@ -273,11 +277,15 @@ def main(
 
     if get_rank() == 0:
         for i, prompt in enumerate(prompts):
-            print(f"> {prompt}")
-            answer = llama.tokenizer.decode(out_tokens[i])
-            print(answer)
-            print("---------------")
+            if len(prompt[0]['content']) < 200:
+                print(f"> {prompt}")
+            if len(out_tokens[i]) < 200:
+                answer = llama.tokenizer.decode(out_tokens[i])
+                print(answer)
+                print("---------------")
 
+        print(f"Total tokens: {total_tokens}")
+        print(f"Elapsed time: {elapsed_time:.2f} seconds")
         print(f"Tokens per second: {tokens_per_second:.2f} tokens/sec")
 
 
@@ -288,6 +296,8 @@ if __name__ == "__main__":
     parser.add_argument("params_file")
     parser.add_argument("--use-cache", action="store_true")
     parser.add_argument("--use-fast-ring-decoding", action="store_true")
+    parser.add_argument("--context-len",type=int,default=32000,)
+    parser.add_argument("--max-completion-tokens", type=int, default=512)
     parser.add_argument("--profile", action="store_true")
 
     args = parser.parse_args()
@@ -298,6 +308,8 @@ if __name__ == "__main__":
             args.params_file,
             args.use_cache,
             args.use_fast_ring_decoding,
+            args.max_completion_tokens,
+            args.context_len,
             args.profile,
         )
     finally:
